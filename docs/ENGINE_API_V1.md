@@ -1,7 +1,7 @@
 # OpenMontage Engine API v1 协议
 
-状态：Draft 1（进入实现前冻结）  
-适用范围：CouncilForge ↔ OpenMontage Engine  
+状态：Implemented 1.0
+适用范围：CouncilForge ↔ OpenMontage Engine
 协议前缀：`/v1`
 
 ## 1. 设计目标
@@ -123,6 +123,8 @@ v1 协议必须满足：
 - `pipeline.name`，可选固定版本；
 - `input`：已经由 CouncilForge 补齐的视频结构化参数；
 - `config_version`：本次任务对应的平台配置版本。
+- `execution_mode`：`engine_managed` 保留引擎审批，`platform_managed`
+  表示 CouncilForge 已完成审批并由引擎直接进入确定性执行。
 
 可选 `credential_grants` 是只写字段，只能携带任务范围、短时有效的凭证或不透明引用。引擎不得在任务快照、日志、事件、异常或产物中返回或明文持久化该字段。
 

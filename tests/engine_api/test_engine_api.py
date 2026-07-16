@@ -35,7 +35,11 @@ def manifest(title: str = "CouncilForge") -> dict:
     }
 
 
-def request_body(title: str = "CouncilForge", tenant: str = "tenant-a") -> dict:
+def request_body(
+    title: str = "CouncilForge",
+    tenant: str = "tenant-a",
+    execution_mode: str = "engine_managed",
+) -> dict:
     return {
         "schema_version": "1.0",
         "request_id": f"request-{title}",
@@ -44,6 +48,7 @@ def request_body(title: str = "CouncilForge", tenant: str = "tenant-a") -> dict:
         "pipeline": {"name": "councilforge-platform", "version": "1.0"},
         "input": manifest(title),
         "config_version": "video-v1",
+        "execution_mode": execution_mode,
         "credential_grants": {"provider_secret": "must-never-persist"},
     }
 
@@ -70,6 +75,31 @@ def test_create_waits_for_script_and_budget_approval_and_never_persists_credenti
     runtime_text = "\n".join(path.read_text(errors="ignore") for path in client.app.state.store.root.rglob("*") if path.is_file())
     assert "must-never-persist" not in runtime_text
     assert "credential_grants" not in runtime_text
+
+
+def test_platform_managed_job_skips_duplicate_engine_approval(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "platform-approved.mp4"
+    import subprocess
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x14232D:s=320x180:d=0.3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(fixture)],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setenv("OPENMONTAGE_ENGINE_RENDER_MODE", "fixture-copy")
+    monkeypatch.setenv("OPENMONTAGE_ENGINE_FIXTURE_VIDEO", str(fixture))
+    response = client.post(
+        "/v1/jobs",
+        json=request_body(execution_mode="platform_managed"),
+        headers=headers(),
+    )
+    assert response.status_code == 202
+    job = response.json()
+    assert job["approval"] is None
+    assert job["execution_mode"] == "platform_managed"
+    assert job["status"] in {"running", "rendering", "succeeded"}
 
 
 def test_idempotency_replays_same_body_and_rejects_conflict(client: TestClient) -> None:

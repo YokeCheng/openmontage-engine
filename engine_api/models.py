@@ -67,6 +67,7 @@ class CreateJobRequest(BaseModel):
     pipeline: PipelineRef
     input: VideoExecutionManifest
     config_version: str = Field(min_length=1, max_length=240)
+    execution_mode: Literal["engine_managed", "platform_managed"] = "engine_managed"
     credential_grants: dict[str, Any] | None = Field(default=None, exclude=True)
 
 

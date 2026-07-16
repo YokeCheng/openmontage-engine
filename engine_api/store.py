@@ -155,6 +155,7 @@ class EngineStore:
                 "progress": {"percent": 0, "message": "Job accepted", "updated_at": now},
                 "input": safe_body["input"],
                 "config_version": safe_body["config_version"],
+                "execution_mode": safe_body.get("execution_mode", "engine_managed"),
                 "approval": None,
                 "actions": [],
                 "artifacts": [],

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from .models import ApproveRequest, CancelRequest, CreateJobRequest, ResolveActionRequest
 from .renderer import render_job
@@ -126,22 +126,33 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             job["progress"] = {"percent": 16, "message": "Validating script and budget", "updated_at": utc_now()}
             store.save_job(job)
             store.append_event(job, "job.status_changed", {"status": "planning"})
-            approval_id = new_id("approval")
-            job["status"] = "waiting_approval"
-            job["stage"] = "script"
-            job["progress"] = {"percent": 28, "message": "Script and budget ready for approval", "updated_at": utc_now()}
-            job["approval"] = {
-                "approval_id": approval_id,
-                "checkpoint_id": "script-budget-v1",
-                "stage": "script",
-                "status": "pending",
-                "summary": "Review the script, storyboard, and budget before rendering.",
-                "requested_at": utc_now(),
-                "expires_at": None,
-                "review_artifacts": [],
-            }
-            store.save_job(job)
-            store.append_event(job, "approval.required", {"approval_id": approval_id, "stage": "script"})
+            if body.execution_mode == "platform_managed":
+                # CouncilForge owns the human approval, budget policy and
+                # business lifecycle. The engine receives an immutable,
+                # already-approved manifest and starts deterministic work.
+                job["status"] = "running"
+                job["stage"] = "production"
+                job["progress"] = {"percent": 40, "message": "Preparing deterministic render", "updated_at": utc_now()}
+                store.save_job(job)
+                store.append_event(job, "job.status_changed", {"status": "running", "approved_by": "platform"})
+                threading.Thread(target=render_job, args=(store, job["job_id"], REPO_ROOT), daemon=True).start()
+            else:
+                approval_id = new_id("approval")
+                job["status"] = "waiting_approval"
+                job["stage"] = "script"
+                job["progress"] = {"percent": 28, "message": "Script and budget ready for approval", "updated_at": utc_now()}
+                job["approval"] = {
+                    "approval_id": approval_id,
+                    "checkpoint_id": "script-budget-v1",
+                    "stage": "script",
+                    "status": "pending",
+                    "summary": "Review the script, storyboard, and budget before rendering.",
+                    "requested_at": utc_now(),
+                    "expires_at": None,
+                    "review_artifacts": [],
+                }
+                store.save_job(job)
+                store.append_event(job, "approval.required", {"approval_id": approval_id, "stage": "script"})
         return JSONResponse(status_code=202 if created else 200, content=_public_job(store.load_job(job["job_id"]) or job))
 
     @app.get("/v1/jobs/{job_id}")
@@ -233,11 +244,46 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         return {"artifacts": _public_job(owned(job_id, tenant_id)).get("artifacts", [])}
 
     @app.get("/v1/jobs/{job_id}/artifacts/{artifact_id}/content")
-    async def artifact_content(job_id: str, artifact_id: str, tenant_id: str = Depends(authorize)) -> FileResponse:
+    async def artifact_content(
+        job_id: str,
+        artifact_id: str,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+    ) -> Response:
         owned(job_id, tenant_id)
         path = store.artifact_path(job_id, artifact_id)
         if not path or not path.exists():
             raise HTTPException(status_code=404, detail="Artifact not found")
+        range_header = request.headers.get("range")
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            size = path.stat().st_size
+            if not match:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            start_text, end_text = match.groups()
+            if not start_text and not end_text:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            if start_text:
+                start = int(start_text)
+                end = min(int(end_text), size - 1) if end_text else size - 1
+            else:
+                suffix = min(int(end_text), size)
+                start, end = size - suffix, size - 1
+            if start >= size or end < start:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            with path.open("rb") as handle:
+                handle.seek(start)
+                content = handle.read(end - start + 1)
+            return Response(
+                content,
+                status_code=206,
+                media_type="video/mp4",
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{end}/{size}",
+                    "Content-Length": str(len(content)),
+                },
+            )
         return FileResponse(path, media_type="video/mp4", filename=path.name, headers={"Accept-Ranges": "bytes"})
 
     return app
