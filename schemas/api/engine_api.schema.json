@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/api/engine-v1",
+  "title": "OpenMontage Engine API v1 Objects",
+  "type": "object",
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "job_status": {
+      "type": "string",
+      "enum": [
+        "created",
+        "planning",
+        "running",
+        "waiting_approval",
+        "rendering",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "pipeline_ref": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "progress": {
+      "type": "object",
+      "required": ["percent", "updated_at"],
+      "properties": {
+        "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "message": { "type": "string" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "checksum": {
+      "type": "object",
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": { "type": "string", "const": "sha256" },
+        "value": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "job_id",
+        "kind",
+        "role",
+        "media_type",
+        "uri",
+        "version",
+        "created_at"
+      ],
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "job_id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["video", "audio", "subtitle", "image", "script", "manifest", "report", "archive"]
+        },
+        "role": {
+          "type": "string",
+          "enum": ["intermediate", "preview", "review", "final"]
+        },
+        "media_type": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "checksum": { "$ref": "#/$defs/checksum" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": "object",
+      "required": [
+        "approval_id",
+        "checkpoint_id",
+        "stage",
+        "status",
+        "summary",
+        "requested_at",
+        "review_artifacts"
+      ],
+      "properties": {
+        "approval_id": { "type": "string", "minLength": 1 },
+        "checkpoint_id": { "type": "string", "minLength": 1 },
+        "stage": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "approved_with_changes", "expired"]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "requested_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "review_artifacts": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "decided_at": { "$ref": "#/$defs/timestamp" },
+        "decided_by": { "type": "string" },
+        "comment": { "type": "string" },
+        "changes": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "job_error": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "stage": { "type": "string" },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "job": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "job_id",
+        "request_id",
+        "tenant_id",
+        "created_by",
+        "pipeline",
+        "status",
+        "progress",
+        "input",
+        "config_version",
+        "artifacts",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0" },
+        "job_id": { "type": "string", "minLength": 1 },
+        "parent_job_id": { "type": "string", "minLength": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "created_by": { "type": "string", "minLength": 1 },
+        "pipeline": { "$ref": "#/$defs/pipeline_ref" },
+        "status": { "$ref": "#/$defs/job_status" },
+        "stage": { "type": "string" },
+        "progress": { "$ref": "#/$defs/progress" },
+        "input": { "type": "object" },
+        "config_version": { "type": "string", "minLength": 1 },
+        "approval": {
+          "oneOf": [
+            { "$ref": "#/$defs/approval" },
+            { "type": "null" }
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "error": {
+          "oneOf": [
+            { "$ref": "#/$defs/job_error" },
+            { "type": "null" }
+          ]
+        },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "correlation_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "event_id",
+        "job_id",
+        "tenant_id",
+        "sequence",
+        "type",
+        "occurred_at",
+        "data"
+      ],
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0" },
+        "event_id": { "type": "string", "minLength": 1 },
+        "job_id": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "type": {
+          "type": "string",
+          "enum": [
+            "job.created",
+            "job.status_changed",
+            "job.cancel_requested",
+            "stage.started",
+            "stage.progressed",
+            "stage.completed",
+            "stage.failed",
+            "approval.required",
+            "approval.resolved",
+            "artifact.created",
+            "artifact.updated",
+            "job.succeeded",
+            "job.failed",
+            "job.cancelled"
+          ]
+        },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "correlation_id": { "type": "string" },
+        "data": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
