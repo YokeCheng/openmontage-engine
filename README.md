@@ -1,3 +1,109 @@
+<!-- openmontage-engine downstream notice -->
+
+# OpenMontage Engine
+
+OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calesthio/OpenMontage](https://github.com/calesthio/OpenMontage) 的完整源码演进。
+
+它不承担平台级用户交互、需求理解、模型决策或多智能体编排；这些职责统一由 CouncilForge 负责。OpenMontage Engine 接收结构化视频任务，执行素材处理、视频流水线、人工审批检查点、渲染、断点恢复和产物输出。
+
+> 当前阶段：工程基线初始化。暂不修改上游核心能力，先建立一个可独立运行、可测试、可追踪、可回滚、可持续同步上游的版本基线。
+
+## 系统边界
+
+```text
+用户 / 业务系统
+      │
+      ▼
+CouncilForge（唯一 Agent 大脑）
+      │  REST / Event / 临时任务凭证
+      ▼
+OpenMontage Engine（视频执行引擎）
+      │
+      ▼
+FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
+```
+
+职责原则：
+
+- CouncilForge 负责需求理解、模型调用、Agent 决策、权限、审批和业务编排；
+- OpenMontage Engine 负责视频流水线、素材处理、进度、检查点、渲染和产物；
+- 两个项目保持独立仓库、独立容器、独立依赖和独立发布流程；
+- OpenMontage Engine 不保存平台级大模型密钥，只接受单次任务参数和临时凭证；
+- 两个项目通过稳定协议通信，不将 OpenMontage 源码复制进 CouncilForge。
+
+## 当前基线
+
+| 项目 | 上游版本策略 | Commit |
+|---|---|---|
+| OpenMontage | 上游暂无正式 Release/Tag，固定经本地验证的快照 | `f8d94632ea9bd0057da31904acca1cefecf005dd` |
+| OpenMontage Engine | `openmontage-engine-v0.1.0-base` | 基线初始化提交 |
+
+基线验证结果：
+
+- Python 契约测试：561 passed，7 skipped；
+- Remotion 零密钥演示：成功生成 1920×1080、30fps、H.264/AAC 视频；
+- FFmpeg、Remotion、Piper TTS 和 HyperFrames 基础环境已完成安装检查；
+- 未配置云端模型密钥，涉及付费供应商的生成能力不属于本次基线验证范围。
+
+详细上游关系和升级方法参见 [UPSTREAM.md](UPSTREAM.md)，机器可读版本锁定信息参见 [upstream.lock.yaml](upstream.lock.yaml)。
+
+## 演进路线
+
+### Phase 0：稳定工程基线
+
+- 保留 OpenMontage 完整 Git 历史、源码和 AGPLv3 许可证；
+- `origin` 指向自有仓库，`upstream` 指向官方仓库；
+- 建立 `main`、`develop` 和基线标签；
+- 每次升级固定到明确 Commit，并在合并前完成回归验证。
+
+### Phase 1：轻服务化
+
+第一版在现有 CLI、流水线和 checkpoint 机制外增加最小服务接口：
+
+```text
+GET  /health
+GET  /capabilities
+GET  /pipelines
+POST /jobs
+GET  /jobs/{job_id}
+POST /jobs/{job_id}/approve
+POST /jobs/{job_id}/cancel
+GET  /jobs/{job_id}/artifacts
+GET  /jobs/{job_id}/events
+```
+
+统一任务状态：
+
+```text
+created → planning → running → waiting_approval → rendering
+        → succeeded / failed / cancelled
+```
+
+### Phase 2：CouncilForge 接入
+
+- 定义任务、状态、审批、事件和产物协议；
+- 在 CouncilForge 中增加视频生产 Skill 和 OpenMontage 客户端；
+- 打通提交任务、进度查询、人工审批和产物回传；
+- 使用 Docker Compose 验证双容器部署。
+
+### Phase 3：深度引擎化
+
+- 标准任务节点、持久化状态和可靠重试；
+- 暂停、恢复、取消、并发队列和资源限制；
+- 对象存储、实时事件、多租户、配额和审计；
+- 可注册的视频流水线插件；
+- 将所有业务决策和模型调用彻底上移到 CouncilForge。
+
+## 许可证说明
+
+本项目继承 OpenMontage 的 GNU Affero General Public License v3.0。修改、部署和对外提供网络服务时，应按 AGPLv3 履行相应源码提供义务。商业化及 SaaS 场景上线前应由专业律师复核。本说明不构成法律意见。
+
+---
+
+## OpenMontage 上游项目说明
+
+以下内容保留自 OpenMontage 上游 README，用于理解和运行原始能力。
+
 <p align="center">
   <img src="assets/logo.png" alt="OpenMontage" width="200">
 </p>

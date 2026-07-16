@@ -1,0 +1,20 @@
+project: calesthio/OpenMontage
+repository: https://github.com/calesthio/OpenMontage.git
+release: null
+ref_type: commit
+commit: f8d94632ea9bd0057da31904acca1cefecf005dd
+commit_date: 2026-07-12
+integrated_at: 2026-07-16
+integration_type: verified-commit-snapshot
+license: AGPL-3.0-only
+verification:
+  contract_tests:
+    passed: 561
+    skipped: 7
+  demo_render:
+    status: passed
+    width: 1920
+    height: 1080
+    fps: 30
+    video_codec: h264
+    audio_codec: aac
