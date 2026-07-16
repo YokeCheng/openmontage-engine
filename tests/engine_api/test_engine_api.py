@@ -111,6 +111,30 @@ def test_idempotency_replays_same_body_and_rejects_conflict(client: TestClient) 
     assert conflict.json()["error_code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_registered_upstream_pipeline_is_accepted_and_unknown_pipeline_is_rejected(
+    client: TestClient,
+) -> None:
+    upstream = request_body(execution_mode="platform_managed")
+    upstream["pipeline"] = {"name": "animated-explainer", "version": "2.0"}
+    accepted = client.post(
+        "/v1/jobs",
+        json=upstream,
+        headers=headers(key="upstream-pipeline"),
+    )
+    assert accepted.status_code == 202
+    assert accepted.json()["pipeline"]["name"] == "animated-explainer"
+
+    unknown = request_body()
+    unknown["pipeline"] = {"name": "not-a-real-pipeline", "version": "1.0"}
+    rejected = client.post(
+        "/v1/jobs",
+        json=unknown,
+        headers=headers(key="unknown-pipeline"),
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["error_code"] == "PIPELINE_NOT_REGISTERED"
+
+
 def test_tenant_isolation_and_invalid_approval_transition(client: TestClient) -> None:
     job = create(client)
     assert client.get(f"/v1/jobs/{job['job_id']}", headers={"X-Tenant-ID": "tenant-b"}).status_code == 404
@@ -154,6 +178,15 @@ def test_approval_is_idempotent_and_render_registers_range_artifact(
     )
     assert ranged.status_code == 206
     assert len(ranged.content) == 16
+    subtitle = next(item for item in current["artifacts"] if item["kind"] == "subtitle")
+    subtitle_response = client.get(
+        f"/v1/jobs/{job['job_id']}/artifacts/{subtitle['artifact_id']}/content",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert subtitle_response.status_code == 200
+    assert subtitle_response.headers["content-type"].startswith("application/x-subrip")
+    assert "CouncilForge plans" in subtitle_response.text
+    assert subtitle["metadata"]["cue_count"] == 1
     replay = client.post(f"/v1/jobs/{job['job_id']}/approve", headers={"X-Tenant-ID": "tenant-a"}, json=body)
     assert replay.status_code == 200
 

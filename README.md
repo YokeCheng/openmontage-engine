@@ -6,7 +6,7 @@ OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calest
 
 它不承担平台级用户交互、需求理解、模型决策或多智能体编排；这些职责统一由 CouncilForge 负责。OpenMontage Engine 接收结构化视频任务，执行素材处理、视频流水线、人工审批检查点、渲染、断点恢复和产物输出。
 
-> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 提供 CouncilForge 专用的独立任务 API，并通过本地 Remotion 流水线真实渲染 MP4。
+> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 提供 CouncilForge 专用的独立任务 API，通过统一执行清单接收全部 Pipeline 选择，并用本地 Remotion 真实渲染 MP4 与 SRT。
 
 ## 系统边界
 
@@ -49,13 +49,13 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 
 ## CouncilForge Engine API v1
 
-服务位于 `engine_api/`，运行状态保存在 Git 忽略的 `.engine-runtime/`。它提供幂等任务创建、脚本/预算审批、待处理动作、取消、事件、重启恢复、租户隔离以及支持 Range 的视频产物读取。任务凭证是只写字段，不会进入快照、事件或产物。
+服务位于 `engine_api/`，运行状态保存在 Git 忽略的 `.engine-runtime/`。它提供幂等任务创建、脚本/预算审批、待处理动作、取消、事件、有界并发、重启恢复、租户隔离以及支持 Range 的多产物读取。任务凭证是只写字段，不会进入快照、事件或产物。
 
 ```bash
 .venv/bin/python -m uvicorn engine_api.app:app --host 127.0.0.1 --port 8100
 ```
 
-API 使用 `/v1` 前缀。当前面向平台的 `councilforge-platform` 流水线接收产品介绍和知识解说两种结构化清单，并使用本地 Remotion 真实渲染 MP4。`platform_managed` 模式直接执行已经由 CouncilForge 审批的清单；`engine_managed` 模式保留引擎自己的审批检查点。OpenMontage 原有全部 Pipeline 仍保留，但尚未全部通过该服务暴露。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
+API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取 OpenMontage 的全部 Pipeline，创建任务时会校验所选 Pipeline；CouncilForge 将这些创作流程归一为同一份已审批执行清单，由引擎确定性渲染。`platform_managed` 模式直接执行已经由 CouncilForge 审批的清单；`engine_managed` 模式保留引擎自己的审批检查点。当前零密钥执行路径真实输出 H.264/AAC MP4 和逐镜头 SRT；云端图片、视频、TTS 与音乐能力按工具注册表实时报告，未配置时明确标记不可用。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
 
 ## 演进路线
 

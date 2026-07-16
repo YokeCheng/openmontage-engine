@@ -54,7 +54,7 @@ class VideoExecutionManifest(BaseModel):
 
 
 class PipelineRef(BaseModel):
-    name: Literal["councilforge-platform"]
+    name: str = Field(min_length=1, max_length=120)
     version: str = "1.0"
 
 

@@ -6,21 +6,63 @@ import asyncio
 import json
 import os
 import re
-import threading
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+import yaml
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from .models import ApproveRequest, CancelRequest, CreateJobRequest, ResolveActionRequest
-from .renderer import render_job
+from .scheduler import ExecutionScheduler
 from .store import EngineStore, TERMINAL, new_id, utc_now
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pipeline_catalog() -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
+    for path in sorted((REPO_ROOT / "pipeline_defs").glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        stages = data.get("stages") or []
+        catalog.append(
+            {
+                "name": data.get("name") or path.stem,
+                "version": str(data.get("version") or "1.0"),
+                "description": data.get("description") or "",
+                "stability": data.get("stability") or ("test" if path.stem == "framework-smoke" else "production"),
+                "stages": [stage.get("name") if isinstance(stage, dict) else stage for stage in stages],
+                "execution_contract": "normalized-video-manifest",
+            }
+        )
+    return catalog
+
+
+def _provider_capabilities() -> dict[str, Any]:
+    try:
+        from tools.tool_registry import registry
+
+        registry.ensure_discovered()
+        return registry.provider_menu_summary()
+    except Exception as exc:
+        return {
+            "composition_runtimes": {
+                "ffmpeg": bool(shutil.which("ffmpeg")),
+                "remotion": (REPO_ROOT / "remotion-composer" / "node_modules").exists(),
+                "hyperframes": False,
+            },
+            "capabilities": [],
+            "runtime_warnings": [f"Tool registry unavailable: {type(exc).__name__}"],
+            "setup_offers": [],
+        }
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -50,16 +92,17 @@ def problem(status: int, title: str, detail: str, code: str, request: Request | 
 def create_app(runtime_root: Path | None = None) -> FastAPI:
     root = runtime_root or Path(os.getenv("OPENMONTAGE_ENGINE_RUNTIME", REPO_ROOT / ".engine-runtime"))
     store = EngineStore(root)
+    scheduler = ExecutionScheduler(store, REPO_ROOT)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        for job in store.list_all_jobs():
-            if job.get("status") in {"running", "rendering"}:
-                threading.Thread(target=render_job, args=(store, job["job_id"], REPO_ROOT), daemon=True).start()
+        scheduler.recover()
         yield
+        scheduler.shutdown()
 
     app = FastAPI(title="OpenMontage Engine API", version="1.0.0", lifespan=lifespan)
     app.state.store = store
+    app.state.scheduler = scheduler
 
     async def authorize_service(
         authorization: str | None = Header(default=None),
@@ -88,17 +131,38 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
 
     @app.get("/v1/capabilities")
     async def capabilities(_: None = Depends(authorize_service)) -> dict[str, Any]:
+        menu = await asyncio.to_thread(_provider_capabilities)
         return {
             "schema_version": "1.0",
             "role": "deterministic-video-executor",
             "formats": ["product_intro", "knowledge_explainer"],
-            "renderers": [{"name": "remotion", "available": (REPO_ROOT / "remotion-composer" / "node_modules").exists()}],
+            "scheduler": {"kind": "bounded-worker-pool", "max_workers": scheduler.max_workers, "restart_recovery": True},
+            # These are the runtimes implemented by the normalized manifest
+            # adapter, not every runtime installed in the upstream toolbox.
+            "renderers": [
+                {
+                    "name": "remotion",
+                    "available": bool((menu.get("composition_runtimes") or {}).get("remotion")),
+                }
+            ],
+            "toolbox_composition_runtimes": menu.get("composition_runtimes", {}),
+            "capabilities": menu.get("capabilities", []),
+            "setup_offers": menu.get("setup_offers", []),
+            "runtime_warnings": menu.get("runtime_warnings", []),
             "requires_model_credentials": False,
         }
 
     @app.get("/v1/pipelines")
     async def pipelines(_: None = Depends(authorize_service)) -> dict[str, Any]:
-        return {"pipelines": [{"name": "councilforge-platform", "version": "1.0", "formats": ["product_intro", "knowledge_explainer"]}]}
+        return {
+            "pipelines": _pipeline_catalog(),
+            "adapter": {
+                "name": "councilforge-platform",
+                "version": "2.0",
+                "formats": ["product_intro", "knowledge_explainer"],
+                "description": "Executes an approved CouncilForge manifest using the selected OpenMontage capability path.",
+            },
+        }
 
     @app.get("/v1/jobs")
     async def list_jobs(tenant_id: str = Depends(authorize)) -> dict[str, Any]:
@@ -116,6 +180,15 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return problem(400, "Missing idempotency key", "Idempotency-Key is required.", "IDEMPOTENCY_KEY_REQUIRED", request)
         if body.tenant_id != tenant_id:
             return problem(403, "Tenant mismatch", "The body tenant does not match X-Tenant-ID.", "TENANT_MISMATCH", request)
+        supported_pipelines = {item["name"] for item in _pipeline_catalog()} | {"councilforge-platform"}
+        if body.pipeline.name not in supported_pipelines:
+            return problem(
+                400,
+                "Unknown pipeline",
+                f"Pipeline '{body.pipeline.name}' is not registered by this engine.",
+                "PIPELINE_NOT_REGISTERED",
+                request,
+            )
         try:
             job, created = store.create_job(body.model_dump(), idempotency_key, x_correlation_id or f"corr_{uuid.uuid4().hex}")
         except ValueError:
@@ -135,7 +208,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 job["progress"] = {"percent": 40, "message": "Preparing deterministic render", "updated_at": utc_now()}
                 store.save_job(job)
                 store.append_event(job, "job.status_changed", {"status": "running", "approved_by": "platform"})
-                threading.Thread(target=render_job, args=(store, job["job_id"], REPO_ROOT), daemon=True).start()
+                scheduler.submit(job["job_id"])
             else:
                 approval_id = new_id("approval")
                 job["status"] = "waiting_approval"
@@ -176,7 +249,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         job["progress"] = {"percent": 48, "message": "Preparing deterministic render", "updated_at": utc_now()}
         store.save_job(job)
         store.append_event(job, "approval.resolved", {"approval_id": body.approval_id, "decision": body.decision})
-        threading.Thread(target=render_job, args=(store, job_id, REPO_ROOT), daemon=True).start()
+        scheduler.submit(job_id)
         return JSONResponse(content=_public_job(store.load_job(job_id) or job))
 
     @app.post("/v1/jobs/{job_id}/cancel", status_code=202)
@@ -250,10 +323,21 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         request: Request,
         tenant_id: str = Depends(authorize),
     ) -> Response:
-        owned(job_id, tenant_id)
+        job = owned(job_id, tenant_id)
+        artifact = next(
+            (
+                item
+                for item in job.get("artifacts", [])
+                if item.get("artifact_id") == artifact_id
+            ),
+            None,
+        )
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
         path = store.artifact_path(job_id, artifact_id)
         if not path or not path.exists():
             raise HTTPException(status_code=404, detail="Artifact not found")
+        media_type = str(artifact.get("media_type") or "application/octet-stream")
         range_header = request.headers.get("range")
         if range_header:
             match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
@@ -277,14 +361,19 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return Response(
                 content,
                 status_code=206,
-                media_type="video/mp4",
+                media_type=media_type,
                 headers={
                     "Accept-Ranges": "bytes",
                     "Content-Range": f"bytes {start}-{end}/{size}",
                     "Content-Length": str(len(content)),
                 },
             )
-        return FileResponse(path, media_type="video/mp4", filename=path.name, headers={"Accept-Ranges": "bytes"})
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=path.name,
+            headers={"Accept-Ranges": "bytes"},
+        )
 
     return app
 

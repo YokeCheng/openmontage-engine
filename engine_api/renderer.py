@@ -7,10 +7,12 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from .store import EngineStore, new_id, utc_now
+from tools.subtitle.subtitle_gen import SubtitleGen
 
 
 def _ffprobe(path: Path) -> dict[str, Any]:
@@ -71,7 +73,19 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                 "npx", "remotion", "render", "src/index.tsx", "CouncilForgePlatform",
                 str(output_path), f"--props={props_path}", "--codec=h264",
             ]
-            subprocess.run(command, cwd=composer, check=True)
+            process = subprocess.Popen(command, cwd=composer)
+            while process.poll() is None:
+                latest = store.load_job(job_id)
+                if not latest or latest.get("status") == "cancelled":
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    return
+                time.sleep(0.25)
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, command)
 
         current = store.load_job(job_id)
         if not current or current["status"] == "cancelled":
@@ -79,7 +93,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
         metadata = _ffprobe(output_path)
         artifact_id = new_id("artifact")
-        artifact = {
+        video_artifact = {
             "artifact_id": artifact_id,
             "job_id": job_id,
             "kind": "video",
@@ -93,12 +107,59 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             "created_at": utc_now(),
             "metadata": metadata,
         }
-        current["artifacts"] = [artifact]
+        artifacts = [video_artifact]
+        if bool(manifest.get("audio", {}).get("subtitles", True)):
+            subtitle_path = (artifact_dir / "subtitles.srt").resolve()
+            cursor = 0.0
+            segments = []
+            for scene in manifest["scenes"]:
+                end = cursor + float(scene["duration_seconds"])
+                segments.append({"text": scene.get("narration", ""), "start": cursor, "end": end})
+                cursor = end
+            subtitle_result = SubtitleGen().execute(
+                {
+                    "segments": segments,
+                    "format": "srt",
+                    "output_path": str(subtitle_path),
+                    # Each scene is already an editorially approved caption unit.
+                    # Keeping one scene per cue preserves its exact timeline,
+                    # especially for Chinese narration without word timestamps.
+                    "max_words_per_cue": 1,
+                }
+            )
+            if subtitle_result.success:
+                subtitle_digest = hashlib.sha256(subtitle_path.read_bytes()).hexdigest()
+                subtitle_id = new_id("artifact")
+                artifacts.append(
+                    {
+                        "artifact_id": subtitle_id,
+                        "job_id": job_id,
+                        "kind": "subtitle",
+                        "role": "final",
+                        "media_type": "application/x-subrip; charset=utf-8",
+                        "uri": f"engine://jobs/{job_id}/artifacts/{subtitle_id}",
+                        "storage_name": "artifacts/subtitles.srt",
+                        "version": 1,
+                        "size_bytes": subtitle_path.stat().st_size,
+                        "checksum": {"algorithm": "sha256", "value": subtitle_digest},
+                        "created_at": utc_now(),
+                        "metadata": {
+                            "language": manifest.get("language", "zh-CN"),
+                            "cue_count": subtitle_result.data.get("cue_count", len(segments)),
+                        },
+                    }
+                )
+        current["artifacts"] = artifacts
         current["status"] = "succeeded"
         current["stage"] = "delivery"
         current["progress"] = {"percent": 100, "message": "Video ready", "updated_at": utc_now()}
         store.save_job(current)
-        store.append_event(current, "artifact.created", {"artifact_id": artifact_id, "kind": "video"})
+        for artifact in artifacts:
+            store.append_event(
+                current,
+                "artifact.created",
+                {"artifact_id": artifact["artifact_id"], "kind": artifact["kind"]},
+            )
         store.append_event(current, "job.succeeded", {"artifact_id": artifact_id})
     except Exception as exc:
         current = store.load_job(job_id)
