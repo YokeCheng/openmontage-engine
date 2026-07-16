@@ -16,6 +16,10 @@ import { ProductReveal, ProductRevealProps } from "./components/ProductReveal";
 import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { CollageBurst, CollageBurstProps } from "./CollageBurst";
 import { LyricOverlay, LyricOverlayProps } from "./LyricOverlay";
+import {
+  CouncilForgePlatform,
+  CouncilForgePlatformProps,
+} from "./CouncilForgePlatform";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -135,6 +139,41 @@ const calculateMetadata: CalculateMetadataFunction<ExplainerProps> = async ({
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="CouncilForgePlatform"
+        component={CouncilForgePlatform}
+        durationInFrames={30 * 30}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          title: "CouncilForge Video Studio",
+          objective: "A deterministic zero-key platform demonstration",
+          format: "product_intro",
+          language: "zh-CN",
+          scenes: [
+            {
+              scene_id: "scene-01",
+              title: "One creative brain",
+              duration_seconds: 30,
+              narration: "CouncilForge plans. OpenMontage executes.",
+            },
+          ],
+          render: {
+            aspect_ratio: "16:9",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            duration_seconds: 30,
+          },
+        } satisfies CouncilForgePlatformProps}
+        calculateMetadata={async ({ props }) => ({
+          durationInFrames: Math.ceil(props.render.duration_seconds * props.render.fps),
+          fps: props.render.fps,
+          width: props.render.width,
+          height: props.render.height,
+        })}
+      />
       <Composition
         id="Explainer"
         component={Explainer}

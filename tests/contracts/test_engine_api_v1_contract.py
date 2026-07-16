@@ -67,6 +67,7 @@ def test_job_statuses_are_frozen_for_v1() -> None:
         "planning",
         "running",
         "waiting_approval",
+        "waiting_action",
         "rendering",
         "succeeded",
         "failed",

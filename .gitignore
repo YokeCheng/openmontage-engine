@@ -97,3 +97,6 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+
+# CouncilForge engine runtime (job snapshots, events, and rendered artifacts)
+.engine-runtime/

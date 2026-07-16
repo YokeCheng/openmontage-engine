@@ -26,10 +26,14 @@ v1 协议必须满足：
 | GET | `/capabilities` | 查询当前运行环境可用能力 | `200` |
 | GET | `/pipelines` | 查询可执行流水线及输入要求 | `200` |
 | POST | `/jobs` | 幂等创建异步任务 | `202`；重复请求返回原任务 |
+| GET | `/jobs` | 按租户列出任务 | `200` |
 | GET | `/jobs/{job_id}` | 查询任务快照 | `200` |
 | POST | `/jobs/{job_id}/approve` | 处理当前人工审批点 | `200` |
 | POST | `/jobs/{job_id}/cancel` | 请求取消非终态任务 | `202` 或已终止时 `200` |
+| GET | `/jobs/{job_id}/actions` | 查询待处理动作 | `200` |
+| POST | `/jobs/{job_id}/actions/{action_id}/resolve` | 处理待决动作 | `200` |
 | GET | `/jobs/{job_id}/artifacts` | 查询产物清单 | `200` |
+| GET | `/jobs/{job_id}/artifacts/{artifact_id}/content` | 支持 Range 的媒体读取 | `200/206` |
 | GET | `/jobs/{job_id}/events` | 游标分页或 SSE 读取事件 | `200` |
 
 所有业务响应使用 `application/json`。事件接口在请求头为 `Accept: text/event-stream` 时返回 SSE，否则返回 JSON 分页结果。
@@ -131,6 +135,7 @@ v1 协议必须满足：
 
 ```text
 created → planning → running → waiting_approval → running
+                         └──→ waiting_action ────→ running
                          │             │
                          └─────────────┴────→ rendering → succeeded
 
@@ -146,6 +151,7 @@ created → planning → running → waiting_approval → running
 | `planning` | 校验流水线、能力、输入和资源；不进行新的业务或创意模型决策 |
 | `running` | 执行研究结果之后的素材、编辑或其他非最终渲染阶段 |
 | `waiting_approval` | 已到达人工检查点，执行暂停且等待 CouncilForge 决策 |
+| `waiting_action` | 等待缺失输入、预算、供应商降级或质量修订等显式动作 |
 | `rendering` | 正在执行最终合成、编码或质量验证 |
 | `succeeded` | 成功完成且最终产物已登记 |
 | `failed` | 不可自动恢复或重试耗尽，包含结构化错误 |
