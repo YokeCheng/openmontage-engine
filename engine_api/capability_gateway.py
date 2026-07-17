@@ -18,7 +18,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from fastapi.encoders import jsonable_encoder
 from jsonschema import Draft202012Validator
@@ -32,6 +32,65 @@ from .store import canonical_digest, utc_now
 
 ACTIVE_EXECUTION_STATES = {"queued", "running", "cancel_requested"}
 TERMINAL_EXECUTION_STATES = {"succeeded", "failed", "cancelled"}
+
+_SENSITIVE_RESULT_KEYS = (
+    "api_key",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+_SIGNED_URL_QUERY_KEYS = {
+    "accesskeyid",
+    "expires",
+    "ossaccesskeyid",
+    "signature",
+    "x-amz-credential",
+    "x-amz-expires",
+    "x-amz-security-token",
+    "x-amz-signature",
+}
+
+
+def _is_sensitive_result_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(fragment in normalized for fragment in _SENSITIVE_RESULT_KEYS)
+
+
+def _is_signed_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.query:
+        return False
+    query_keys = {
+        key.lower()
+        for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    return bool(query_keys & _SIGNED_URL_QUERY_KEYS)
+
+
+def _sanitize_persisted_result(value: Any) -> Any:
+    """Remove credentials and temporary signed URLs before writing execution state."""
+
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            if _is_sensitive_result_key(key):
+                sanitized[key] = "[redacted]"
+            else:
+                sanitized[key] = _sanitize_persisted_result(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_persisted_result(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_persisted_result(item) for item in value]
+    if isinstance(value, str) and _is_signed_url(value):
+        return "[redacted-signed-url]"
+    return value
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -486,7 +545,7 @@ class CapabilityGateway:
             current["status"] = "succeeded" if result.success else "failed"
             current["result"] = {
                 "success": result.success,
-                "data": jsonable_encoder(result.data),
+                "data": _sanitize_persisted_result(jsonable_encoder(result.data)),
                 "cost_usd": float(result.cost_usd or 0),
                 "duration_seconds": float(result.duration_seconds or 0),
                 "seed": result.seed,

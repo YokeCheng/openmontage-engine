@@ -315,6 +315,9 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             content={
                 "configured_fields": sorted(key for key, value in body.values.items() if value),
                 "capabilities": _provider_capabilities(),
+                # Returning the refreshed registry avoids a second expensive
+                # discovery request from the platform after every save.
+                "providers": _provider_catalog()["providers"],
             }
         )
 

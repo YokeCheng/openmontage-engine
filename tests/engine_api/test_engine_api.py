@@ -480,7 +480,15 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
         output = Path(inputs["output_path"])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"agent-hosted-openmontage-artifact")
-        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+        return ToolResult(
+            success=True,
+            data={
+                "output_path": str(output),
+                "audio_url": "https://media.example.test/audio.wav?Expires=123&OSSAccessKeyId=test&Signature=secret",
+                "nested": {"api_token": "must-not-persist"},
+            },
+            artifacts=[str(output)],
+        )
 
     monkeypatch.setattr(diagram, "execute", fake_execute)
     rejected = client.post(
@@ -542,6 +550,12 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
     assert execution["artifacts"]
     assert execution["artifacts"][0]["checksum"]
     assert "metadata" in execution["artifacts"][0]
+    persisted_result = json.dumps(execution["result"], ensure_ascii=False)
+    assert "must-not-persist" not in persisted_result
+    assert "OSSAccessKeyId" not in persisted_result
+    assert "Signature=" not in persisted_result
+    assert execution["result"]["data"]["audio_url"] == "[redacted-signed-url]"
+    assert execution["result"]["data"]["nested"]["api_token"] == "[redacted]"
     artifact_id = execution["artifacts"][0]["artifact_id"]
     ranged = client.get(
         f"/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content",
