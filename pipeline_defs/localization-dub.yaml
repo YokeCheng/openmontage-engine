@@ -8,6 +8,51 @@ category: custom
 stability: beta
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: localization-source-brief-v1
+  status_reason: "requires_source_materials: source_video_and_target_languages"
+  input_modes:
+    - source_materials
+    - uploaded_video
+    - locale_plan
+  supported_formats:
+    - localization
+  required_brief_fields:
+    - title
+    - objective
+    - language
+  optional_brief_fields:
+    - audience
+    - channel
+    - duration_seconds
+    - call_to_action
+  required_source_materials:
+    - source_video
+    - target_languages
+  capability_requirements:
+    - capability: transcription
+      required: true
+      stage: script
+    - capability: translation
+      required: true
+      stage: script
+    - capability: tts
+      required: false
+      fallback: subtitles_only
+      stage: assets
+    - capability: video_post
+      required: true
+      stage: compose
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - script
+      - assets
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 orchestration:
   mode: executive-producer
   skill: pipelines/localization-dub/executive-producer

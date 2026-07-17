@@ -8,6 +8,47 @@ category: talking_head
 stability: beta
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: source-media-video-brief-v1
+  status_reason: "requires_source_materials: raw_talking_head_video"
+  input_modes:
+    - source_materials
+    - uploaded_video
+  supported_formats:
+    - talking_head_edit
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - audience
+    - channel
+    - duration_seconds
+  optional_brief_fields:
+    - language
+    - visual_style
+    - call_to_action
+  required_source_materials:
+    - raw_talking_head_video
+  capability_requirements:
+    - capability: transcription
+      required: true
+      stage: script
+    - capability: video_post
+      required: true
+      stage: compose
+    - capability: subtitles
+      required: true
+      stage: assets
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - script
+      - scene_plan
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 extensions:
   custom_scripts: true
   custom_playbooks: true

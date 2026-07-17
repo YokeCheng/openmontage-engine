@@ -19,6 +19,50 @@ category: screen_recording
 stability: production
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: screen-demo-source-brief-v1
+  status_reason: "requires_source_materials: screen_recording_or_terminal_script"
+  input_modes:
+    - source_materials
+    - screen_recording
+    - terminal_script
+  supported_formats:
+    - product_intro
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - audience
+    - channel
+    - duration_seconds
+  optional_brief_fields:
+    - language
+    - visual_style
+    - call_to_action
+  required_source_materials:
+    - screen_recording_or_terminal_script
+  capability_requirements:
+    - capability: transcription
+      required: false
+      fallback: manual_annotations
+      stage: script
+    - capability: screen_capture
+      required: false
+      fallback: supplied_recording_or_synthetic_terminal
+      stage: assets
+    - capability: video_post
+      required: true
+      stage: compose
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - script
+      - scene_plan
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 # Production modes this pipeline supports
 production_modes:
   - name: real_capture

@@ -323,8 +323,30 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
 
     talking_head = pipelines["talking-head"]["platform_contract"]
     assert talking_head["readiness"] == "requires_input_adapter"
-    assert talking_head["intake_adapter"] == "unavailable"
+    assert talking_head["intake_adapter"] == "source-media-video-brief-v1"
+    assert talking_head["required_source_materials"] == ["raw_talking_head_video"]
 
+    screen_demo = pipelines["screen-demo"]["platform_contract"]
+    assert screen_demo["readiness"] == "requires_input_adapter"
+    assert screen_demo["required_source_materials"] == [
+        "screen_recording_or_terminal_script"
+    ]
+
+    source_driven = {
+        name: pipelines[name]["platform_contract"]["required_source_materials"]
+        for name in [
+            "clip-factory",
+            "podcast-repurpose",
+            "localization-dub",
+            "documentary-montage",
+        ]
+    }
+    assert source_driven == {
+        "clip-factory": ["long_form_video_or_audio"],
+        "podcast-repurpose": ["podcast_audio_or_video"],
+        "localization-dub": ["source_video", "target_languages"],
+        "documentary-montage": ["archive_or_stock_source_collection"],
+    }
 
 def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(client: TestClient) -> None:
     response = client.get("/v1/pipelines/animation/bundle")

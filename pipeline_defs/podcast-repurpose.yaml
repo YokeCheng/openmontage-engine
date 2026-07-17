@@ -10,6 +10,48 @@ category: custom
 stability: beta
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: podcast-source-brief-v1
+  status_reason: "requires_source_materials: podcast_audio_or_video"
+  input_modes:
+    - source_materials
+    - uploaded_audio
+    - uploaded_video
+  supported_formats:
+    - social_clips
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - audience
+    - channel
+    - duration_seconds
+  optional_brief_fields:
+    - language
+    - visual_style
+    - call_to_action
+  required_source_materials:
+    - podcast_audio_or_video
+  capability_requirements:
+    - capability: transcription
+      required: true
+      stage: script
+    - capability: audio_processing
+      required: true
+      stage: assets
+    - capability: video_post
+      required: true
+      stage: compose
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - script
+      - scene_plan
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 orchestration:
   mode: executive-producer
   skill: pipelines/podcast-repurpose/executive-producer

@@ -11,6 +11,49 @@ category: documentary
 stability: beta
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: documentary-source-brief-v1
+  status_reason: "requires_source_materials: archive_or_stock_source_collection"
+  input_modes:
+    - source_materials
+    - stock_collection
+    - archive_collection
+  supported_formats:
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - audience
+    - channel
+    - duration_seconds
+  optional_brief_fields:
+    - language
+    - visual_style
+    - call_to_action
+  required_source_materials:
+    - archive_or_stock_source_collection
+  capability_requirements:
+    - capability: clip_acquisition
+      required: true
+      fallback: supplied_source_collection
+      stage: assets
+    - capability: music_generation
+      required: false
+      fallback: music_library
+      stage: assets
+    - capability: video_post
+      required: true
+      stage: compose
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - scene_plan
+      - assets
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 # Reference video input support
 reference_input:
   supported: false

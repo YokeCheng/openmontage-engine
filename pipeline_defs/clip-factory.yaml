@@ -9,6 +9,48 @@ category: custom
 stability: beta
 default_checkpoint_policy: guided
 
+platform_contract:
+  version: "1.0"
+  readiness: requires_input_adapter
+  intake_adapter: long-form-source-brief-v1
+  status_reason: "requires_source_materials: long_form_video_or_audio"
+  input_modes:
+    - source_materials
+    - uploaded_video
+    - uploaded_audio
+  supported_formats:
+    - social_clips
+  required_brief_fields:
+    - title
+    - objective
+    - audience
+    - channel
+    - duration_seconds
+  optional_brief_fields:
+    - language
+    - visual_style
+    - call_to_action
+  required_source_materials:
+    - long_form_video_or_audio
+  capability_requirements:
+    - capability: transcription
+      required: true
+      stage: script
+    - capability: scene_detection
+      required: false
+      fallback: transcript_boundaries
+      stage: scene_plan
+    - capability: video_post
+      required: true
+      stage: compose
+  approval_policy:
+    human_approval_stages:
+      - idea
+      - script
+      - scene_plan
+      - edit
+  artifact_schema_contract: openmontage-canonical-artifacts-v1
+
 orchestration:
   mode: executive-producer
   skill: pipelines/clip-factory/executive-producer
