@@ -75,6 +75,10 @@ platform_contract:
       required: false
       fallback: none
       stage: assets
+    - capability: music_search
+      required: false
+      fallback: none
+      stage: assets
   approval_policy:
     human_approval_stages:
       - proposal
@@ -240,6 +244,7 @@ stages:
       - diagram_gen
       - code_snippet
       - music_gen
+      - pixabay_music
     tools_available:
       - remotion_motion_graphics
       - tts_selector
@@ -248,6 +253,7 @@ stages:
       - diagram_gen
       - code_snippet
       - music_gen
+      - pixabay_music
       - math_animate
     checkpoint_required: true
     human_approval_default: true

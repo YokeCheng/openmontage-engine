@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -200,9 +201,17 @@ class PixabayMusic(BaseTool):
         """Build a URL opener with cookie support for session persistence."""
         import http.cookiejar
 
+        context = ssl.create_default_context()
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            pass
         cj = http.cookiejar.CookieJar()
         return urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(cj)
+            urllib.request.HTTPCookieProcessor(cj),
+            urllib.request.HTTPSHandler(context=context),
         )
 
     def _search(self, inputs: dict[str, Any]) -> list[dict]:
@@ -349,7 +358,14 @@ class PixabayMusic(BaseTool):
             },
         )
 
-        with urllib.request.urlopen(request, timeout=60) as response:
+        context = ssl.create_default_context()
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            pass
+        with urllib.request.urlopen(request, timeout=60, context=context) as response:
             output_path.write_bytes(response.read())
 
         return output_path

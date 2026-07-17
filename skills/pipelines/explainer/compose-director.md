@@ -4,10 +4,13 @@
 
 If `asset_manifest.metadata.composition` is `CouncilForgePlatform`, call
 `remotion_motion_graphics` with `operation="render"` and the approved scenes
-and render specification. Persist the tool's returned `render_report` and
-`final_review` directly after checking their schemas. This is the native
-zero-key Remotion path; do not route those scene JSON assets through
-`video_compose` as if they were source footage.
+and render specification, and pass the complete `asset_manifest` unchanged.
+Persist the tool's returned `render_report` and `final_review` directly after
+checking their schemas. This is the native CouncilForge Remotion path; it can
+embed generated scene images, narration audio, and background music from the
+asset manifest. Do not route those scene JSON assets through `video_compose` as
+if they were source footage, and do not omit the asset manifest just because
+the component can fall back to motion graphics.
 
 Build render scenes by joining `scene_plan.scenes[]` to
 `script.sections[]` through `script_section_id`. Each scene must carry the

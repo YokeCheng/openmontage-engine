@@ -1,7 +1,11 @@
 import {
   AbsoluteFill,
+  Audio,
+  Img,
+  Sequence,
   interpolate,
   spring,
+  staticFile,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
@@ -11,7 +15,14 @@ export type CouncilForgeScene = {
   title: string;
   duration_seconds: number;
   narration: string;
-  visual?: { type?: string; description?: string };
+  audio_src?: string;
+  visual?: { type?: string; description?: string; image_src?: string; asset_path?: string };
+};
+
+export type CouncilForgeAudioLayer = {
+  src: string;
+  volume?: number;
+  loop?: boolean;
 };
 
 export type CouncilForgePlatformProps = {
@@ -26,6 +37,10 @@ export type CouncilForgePlatformProps = {
     height: number;
     fps: number;
     duration_seconds: number;
+  };
+  audio?: {
+    narration?: CouncilForgeAudioLayer;
+    music?: CouncilForgeAudioLayer;
   };
 };
 
@@ -53,6 +68,18 @@ function currentScene(props: CouncilForgePlatformProps, seconds: number) {
 
 const zhSceneTitles = ["打破误解", "唯一大脑", "分阶段执行", "强制审批", "可恢复交付"];
 
+function resolveAsset(src: string): string {
+  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) {
+    return src;
+  }
+  const clean = src.replace(/^file:\/\/\/?/, "");
+  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
+    const posix = clean.replace(/\\/g, "/");
+    return posix.startsWith("/") ? `file://${posix}` : `file:///${posix}`;
+  }
+  return staticFile(clean);
+}
+
 const nodeStyle = (active = false): React.CSSProperties => ({
   border: `1px solid ${active ? palette.green : "rgba(233,239,242,.18)"}`,
   background: active ? "rgba(73,163,140,.16)" : "rgba(233,239,242,.045)",
@@ -66,8 +93,10 @@ const SceneGraphic: React.FC<{
   index: number;
   progress: number;
   vertical: boolean;
-}> = ({ index, progress, vertical }) => {
+  scene: CouncilForgeScene;
+}> = ({ index, progress, vertical, scene }) => {
   const visible = (step: number, total: number) => progress >= step / total;
+  const imageSrc = scene.visual?.image_src || scene.visual?.asset_path;
   const panel: React.CSSProperties = {
     width: vertical ? "100%" : 650,
     minHeight: vertical ? 320 : 420,
@@ -79,6 +108,49 @@ const SceneGraphic: React.FC<{
     flexDirection: "column",
     justifyContent: "center",
   };
+
+  if (imageSrc) {
+    return (
+      <div style={{ ...panel, padding: 18, position: "relative", overflow: "hidden" }}>
+        <Img
+          src={resolveAsset(imageSrc)}
+          style={{
+            width: "100%",
+            height: "100%",
+            minHeight: vertical ? 320 : 420,
+            objectFit: "cover",
+            borderRadius: 18,
+            transform: `scale(${1.04 + progress * 0.06})`,
+            filter: "saturate(1.05) contrast(1.02)",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            inset: 18,
+            borderRadius: 18,
+            background:
+              "linear-gradient(180deg, rgba(20,35,45,.08), rgba(20,35,45,.48))",
+            boxShadow: "inset 0 0 0 1px rgba(233,239,242,.16)",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: 42,
+            right: 42,
+            bottom: 38,
+            color: palette.paper,
+            fontSize: vertical ? 20 : 24,
+            lineHeight: 1.35,
+            textShadow: "0 4px 18px rgba(0,0,0,.45)",
+          }}
+        >
+          {scene.visual?.description}
+        </div>
+      </div>
+    );
+  }
 
   if (index === 0) {
     return (
@@ -177,6 +249,13 @@ export const CouncilForgePlatform: React.FC<CouncilForgePlatformProps> = (
   const sceneProgress = Math.min(1, localSeconds / Math.max(.1, scene.duration_seconds));
   const drift = interpolate(progress, [0, 1], [-4, 8]);
   const label = props.format === "product_intro" ? "PRODUCT FILM" : "KNOWLEDGE FILM";
+  let cursorFrames = 0;
+  const sceneAudioSequences = props.scenes.map((item) => {
+    const from = cursorFrames;
+    const duration = Math.max(1, Math.ceil(item.duration_seconds * fps));
+    cursorFrames += duration;
+    return { scene: item, from, duration };
+  });
 
   return (
     <AbsoluteFill
@@ -188,6 +267,19 @@ export const CouncilForgePlatform: React.FC<CouncilForgePlatformProps> = (
         overflow: "hidden",
       }}
     >
+      {props.audio?.music?.src ? (
+        <Audio src={resolveAsset(props.audio.music.src)} volume={props.audio.music.volume ?? 0.12} loop={props.audio.music.loop ?? true} />
+      ) : null}
+      {props.audio?.narration?.src ? (
+        <Audio src={resolveAsset(props.audio.narration.src)} volume={props.audio.narration.volume ?? 1} />
+      ) : null}
+      {sceneAudioSequences.map(({ scene: audioScene, from, duration }) =>
+        audioScene.audio_src ? (
+          <Sequence key={`audio-${audioScene.scene_id}`} from={from} durationInFrames={duration}>
+            <Audio src={resolveAsset(audioScene.audio_src)} volume={1} />
+          </Sequence>
+        ) : null,
+      )}
       <AbsoluteFill
         style={{
           background: `radial-gradient(circle at ${22 + drift}% 20%, rgba(73,163,140,.27), transparent 34%), radial-gradient(circle at 78% ${74 - drift}%, rgba(230,162,60,.18), transparent 31%), linear-gradient(145deg, ${palette.night}, ${palette.monitor})`,
@@ -234,7 +326,7 @@ export const CouncilForgePlatform: React.FC<CouncilForgePlatformProps> = (
               {scene.narration}
             </p>
           </div>
-          <SceneGraphic index={index} progress={sceneProgress} vertical={vertical} />
+          <SceneGraphic index={index} progress={sceneProgress} vertical={vertical} scene={scene} />
         </div>
 
         <div>

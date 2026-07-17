@@ -65,6 +65,16 @@ VIDEO_GEN_LOCAL_ENABLED=     # Set to "true" for local video gen
 VIDEO_GEN_LOCAL_MODEL=       # wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local, cogvideo-5b
 ```
 
+### Pixabay Music note
+
+`pixabay_music` is a zero-key stock-music search/download tool. It is useful for
+experiments, but it is not a stable commercial API and does not count as a
+`music_generation` provider. The tool now uses the `certifi` trust store when it
+is installed, which fixes local Python certificate-chain failures. If Pixabay
+returns `403 Forbidden`, the site is blocking automated access from the current
+network; use `music_gen`, `suno_music`, Freesound, or a user-provided
+`music_library/` track instead of silently claiming Pixabay music was generated.
+
 ---
 
 ## Cloud Providers

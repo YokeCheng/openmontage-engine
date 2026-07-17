@@ -10,6 +10,18 @@ files are real runtime-native assets, not placeholders: persist the returned
 provider cost. Do not require `image_selector` or `tts_selector` for this
 approved no-provider path.
 
+This shortcut is forbidden when the CouncilForge brief or media policy asks for
+external media. If `visual_source` is `ai_image`, call `image_selector` and pass
+the approved `image_provider` as `preferred_provider` unless it is `auto`. If
+voice is anything other than `none`, `off`, or `disabled`, call `tts_selector`
+and pass the approved voice/provider preference as `preferred_provider` when it
+names a provider such as `dashscope`. If music is anything other than `none`,
+`off`, or `disabled`, call the requested music tool; for `pixabay_music`, use
+`pixabay_music` directly. A provider failure is not a reason to silently switch
+to the no-provider Remotion shortcut: either produce the requested asset through
+an approved fallback and record it, or record a `metadata.media_fallbacks[]`
+entry with `kind`, `requested`, `fallback`, `reason`, and `user_impact`.
+
 Before calling the tool, join every `scene_plan.scenes[]` item to the approved
 `script.sections[]` item named by `script_section_id`. Pass the script text as
 the scene's non-empty `narration`, preserve `start_seconds` and `end_seconds`,

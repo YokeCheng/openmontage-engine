@@ -15,6 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from tools.base_tool import (
     BaseTool,
@@ -101,6 +102,10 @@ class RemotionMotionGraphics(BaseTool):
             },
             "output_dir": {"type": "string"},
             "output_path": {"type": "string"},
+            "asset_manifest": {
+                "type": "object",
+                "description": "Optional asset_manifest containing generated images, narration and music to embed.",
+            },
         },
     }
     output_schema = {
@@ -129,12 +134,189 @@ class RemotionMotionGraphics(BaseTool):
         return ToolStatus.UNAVAILABLE
 
     @staticmethod
-    def _normalise_scene(scene: dict[str, Any], index: int) -> dict[str, Any]:
+    def _asset_path(asset: dict[str, Any], workspace_root: Path | None) -> str:
+        value = (
+            asset.get("path")
+            or asset.get("output")
+            or asset.get("output_path")
+            or asset.get("file_path")
+            or asset.get("src")
+            or ""
+        )
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https", "data", "file"}:
+            return value
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return str(candidate)
+        if workspace_root is not None:
+            workspace_candidate = (workspace_root / candidate).resolve()
+            if workspace_candidate.exists():
+                return str(workspace_candidate)
+        return value
+
+    @staticmethod
+    def _asset_kind(asset: dict[str, Any]) -> str:
+        media_type = str(asset.get("media_type") or "").lower()
+        asset_type = str(asset.get("type") or "").lower()
+        path = str(
+            asset.get("path")
+            or asset.get("output")
+            or asset.get("output_path")
+            or asset.get("file_path")
+            or ""
+        ).lower()
+        if asset_type in {"image", "audio", "video", "animation"}:
+            return asset_type
+        if asset_type in {"narration", "voice", "voiceover", "music"}:
+            return "audio"
+        if media_type.startswith("image/") or path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            return "image"
+        if media_type.startswith("audio/") or path.endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg")):
+            return "audio"
+        if media_type.startswith("video/") or path.endswith((".mp4", ".mov", ".webm")):
+            return "video"
+        return asset_type
+
+    @staticmethod
+    def _workspace_root(inputs: dict[str, Any]) -> Path | None:
+        for key in ("output_path", "output_dir"):
+            value = inputs.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            path = Path(value).resolve()
+            current = path if path.is_dir() else path.parent
+            for candidate in (current, *current.parents):
+                if candidate.name.startswith("workspace_") and candidate.parent.name == "workspaces":
+                    return candidate
+        return None
+
+    @classmethod
+    def _manifest_assets(cls, inputs: dict[str, Any]) -> list[dict[str, Any]]:
+        manifest = inputs.get("asset_manifest")
+        if not isinstance(manifest, dict):
+            return []
+        assets = manifest.get("assets")
+        return [item for item in assets if isinstance(item, dict)] if isinstance(assets, list) else []
+
+    @classmethod
+    def _media_for_scenes(cls, inputs: dict[str, Any]) -> dict[str, dict[str, str]]:
+        workspace_root = cls._workspace_root(inputs)
+        assets = cls._manifest_assets(inputs)
+        by_scene: dict[str, dict[str, str]] = {}
+        image_queue: list[str] = []
+        for asset in assets:
+            kind = cls._asset_kind(asset)
+            path = cls._asset_path(asset, workspace_root)
+            if not path:
+                continue
+            scene_id = str(asset.get("scene_id") or asset.get("section_id") or "")
+            if kind == "image":
+                if scene_id:
+                    by_scene.setdefault(scene_id, {}).setdefault("image_src", path)
+                image_queue.append(path)
+            subtype = str(asset.get("subtype") or asset.get("type") or "").lower()
+            if kind == "audio" and subtype in {"narration", "voice", "voiceover"}:
+                if scene_id:
+                    by_scene.setdefault(scene_id, {}).setdefault("audio_src", path)
+        for index, scene in enumerate(inputs.get("scenes") or []):
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id") or scene.get("id") or f"scene-{index + 1:02d}")
+            if scene_id not in by_scene and index < len(image_queue):
+                by_scene[scene_id] = {"image_src": image_queue[index]}
+            elif index < len(image_queue):
+                by_scene.setdefault(scene_id, {}).setdefault("image_src", image_queue[index])
+        return by_scene
+
+    @classmethod
+    def _audio_props(cls, inputs: dict[str, Any]) -> dict[str, Any]:
+        workspace_root = cls._workspace_root(inputs)
+        assets = cls._manifest_assets(inputs)
+        audio: dict[str, Any] = {}
+        for asset in assets:
+            if cls._asset_kind(asset) != "audio":
+                continue
+            path = cls._asset_path(asset, workspace_root)
+            if not path:
+                continue
+            subtype = str(asset.get("subtype") or asset.get("type") or "").lower()
+            if subtype == "music" and "music" not in audio:
+                audio["music"] = {
+                    "src": path,
+                    "volume": float(asset.get("volume") or asset.get("mix_volume") or 0.12),
+                    "loop": bool(asset.get("loop", True)),
+                }
+            elif subtype in {"narration", "voice", "voiceover"} and not asset.get("scene_id") and "narration" not in audio:
+                audio["narration"] = {"src": path, "volume": float(asset.get("volume") or 1)}
+        return audio
+
+    @staticmethod
+    def _is_local_asset(src: str) -> bool:
+        parsed = urlparse(src)
+        if parsed.scheme in {"http", "https", "data"}:
+            return False
+        return bool(src)
+
+    def _stage_public_asset(self, src: str, public_dir: Path, public_prefix: str) -> str:
+        """Copy a local media asset into Remotion public/ and return a staticFile path.
+
+        Chromium intentionally blocks arbitrary ``file://`` media in Remotion
+        renders.  Generated OpenMontage assets therefore need to be staged under
+        ``remotion-composer/public`` and referenced by relative path.
+        """
+
+        if not self._is_local_asset(src):
+            return src
+        clean = src.replace("file://", "")
+        source = Path(clean)
+        if not source.is_absolute():
+            return src
+        if not source.is_file():
+            return src
+        digest = hashlib.sha256(f"{source}:{source.stat().st_mtime_ns}:{source.stat().st_size}".encode()).hexdigest()[:12]
+        safe_name = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in source.name)
+        target = public_dir / f"{digest}-{safe_name}"
+        if not target.is_file():
+            public_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        return f"{public_prefix}/{target.name}"
+
+    def _stage_props_public_assets(self, props: dict[str, Any], output_path: Path) -> dict[str, Any]:
+        namespace = hashlib.sha256(str(output_path.resolve()).encode()).hexdigest()[:16]
+        public_prefix = f"councilforge-runtime/{namespace}"
+        public_dir = self._repo_root / "remotion-composer" / "public" / public_prefix
+        staged = json.loads(json.dumps(props, ensure_ascii=False))
+        for scene in staged.get("scenes", []):
+            if not isinstance(scene, dict):
+                continue
+            visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+            for key in ("image_src", "asset_path"):
+                value = visual.get(key)
+                if isinstance(value, str) and value:
+                    visual[key] = self._stage_public_asset(value, public_dir, public_prefix)
+            value = scene.get("audio_src")
+            if isinstance(value, str) and value:
+                scene["audio_src"] = self._stage_public_asset(value, public_dir, public_prefix)
+        audio = staged.get("audio") if isinstance(staged.get("audio"), dict) else {}
+        for layer_name in ("narration", "music"):
+            layer = audio.get(layer_name)
+            if isinstance(layer, dict) and isinstance(layer.get("src"), str):
+                layer["src"] = self._stage_public_asset(layer["src"], public_dir, public_prefix)
+        return staged
+
+    @staticmethod
+    def _normalise_scene(scene: dict[str, Any], index: int, media: dict[str, str] | None = None) -> dict[str, Any]:
         start = float(scene.get("start_seconds") or 0)
         end = scene.get("end_seconds")
         derived_duration = float(end) - start if end is not None else 0
         duration = float(scene.get("duration_seconds") or scene.get("duration") or derived_duration or 5)
         visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+        media = media or {}
+        visual_asset = media.get("image_src") or visual.get("image_src") or visual.get("asset_path") or visual.get("path")
+        audio_src = media.get("audio_src") or scene.get("audio_src")
         return {
             "scene_id": str(scene.get("scene_id") or scene.get("id") or f"scene-{index + 1:02d}"),
             "title": str(scene.get("title") or scene.get("section") or f"Scene {index + 1}"),
@@ -149,18 +331,29 @@ class RemotionMotionGraphics(BaseTool):
                     or scene.get("description")
                     or ""
                 ),
+                "image_src": str(visual_asset or ""),
             },
+            "audio_src": str(audio_src or ""),
         }
 
     def _props(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        media_by_scene = self._media_for_scenes(inputs)
         return {
             "title": str(inputs["title"]),
             "objective": str(inputs["objective"]),
             "format": str(inputs.get("format") or "knowledge_explainer"),
             "language": str(inputs.get("language") or "zh-CN"),
             "subtitles": bool(inputs.get("subtitles", True)),
-            "scenes": [self._normalise_scene(scene, index) for index, scene in enumerate(inputs["scenes"])],
+            "scenes": [
+                self._normalise_scene(
+                    scene,
+                    index,
+                    media_by_scene.get(str(scene.get("scene_id") or scene.get("id") or f"scene-{index + 1:02d}")),
+                )
+                for index, scene in enumerate(inputs["scenes"])
+            ],
             "render": dict(inputs["render"]),
+            "audio": self._audio_props(inputs),
         }
 
     def _prepare(self, inputs: dict[str, Any]) -> ToolResult:
@@ -199,8 +392,8 @@ class RemotionMotionGraphics(BaseTool):
                 "composition": "CouncilForgePlatform",
                 "props_path": str(props_path),
                 "runtime_native": True,
-                "voice_policy": "none",
-                "music_policy": "none",
+                "voice_policy": "embedded" if props.get("audio", {}).get("narration") else "none",
+                "music_policy": "embedded" if props.get("audio", {}).get("music") else "none",
             },
         }
         return ToolResult(
@@ -256,7 +449,7 @@ class RemotionMotionGraphics(BaseTool):
         started = time.time()
         output_path = Path(inputs.get("output_path") or "renders/final.mp4").resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        props = self._props(inputs)
+        props = self._stage_props_public_assets(self._props(inputs), output_path)
         props_path = output_path.with_suffix(".props.json")
         props_path.write_text(json.dumps(props, ensure_ascii=False, indent=2), encoding="utf-8")
         command = [
@@ -314,6 +507,10 @@ class RemotionMotionGraphics(BaseTool):
             "render_grammar": "explainer-data",
             "metadata": {"composition": "CouncilForgePlatform", "runtime": "remotion"},
         }
+        audio_config = props.get("audio") if isinstance(props.get("audio"), dict) else {}
+        scene_narration_audio = any(scene.get("audio_src") for scene in props.get("scenes", []))
+        narration_present = bool(audio_config.get("narration")) or scene_narration_audio
+        music_present = bool(audio_config.get("music"))
         final_review = {
             "version": "1.0",
             "output_path": str(output_path),
@@ -339,12 +536,12 @@ class RemotionMotionGraphics(BaseTool):
                     "issues": [],
                 },
                 "audio_spotcheck": {
-                    "narration_present": False,
-                    "music_present": False,
+                    "narration_present": narration_present,
+                    "music_present": music_present,
                     "unexpected_silence": False,
                     "clipping_detected": False,
                     "mix_intelligible": True,
-                    "issues": ["Audio intentionally disabled by the approved brief."],
+                    "issues": [] if narration_present or music_present else ["Audio intentionally disabled by the approved brief."],
                 },
                 "promise_preservation": {
                     "delivery_promise_honored": True,

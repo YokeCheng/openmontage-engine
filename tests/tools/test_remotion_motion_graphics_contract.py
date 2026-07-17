@@ -45,6 +45,71 @@ def test_scene_duration_is_derived_from_approved_timeline() -> None:
     assert [scene["duration_seconds"] for scene in props["scenes"]] == [5.0, 6.0]
 
 
+def test_asset_manifest_media_is_added_to_props(tmp_path) -> None:
+    image = tmp_path / "scene.png"
+    narration = tmp_path / "narration.wav"
+    music = tmp_path / "music.wav"
+    image.write_bytes(b"image")
+    narration.write_bytes(b"narration")
+    music.write_bytes(b"music")
+    inputs = _inputs()
+    inputs["asset_manifest"] = {
+        "version": "1.0",
+        "assets": [
+            {"id": "img-1", "type": "image", "scene_id": "scene-1", "path": str(image)},
+            {"id": "voice-1", "type": "audio", "subtype": "narration", "scene_id": "scene-1", "path": str(narration)},
+            {"id": "music", "type": "audio", "subtype": "music", "path": str(music)},
+        ],
+    }
+    props = RemotionMotionGraphics()._props(inputs)
+    assert props["scenes"][0]["visual"]["image_src"] == str(image)
+    assert props["scenes"][0]["audio_src"] == str(narration)
+    assert props["audio"]["music"]["src"] == str(music)
+
+
+def test_manifest_accepts_narration_and_music_as_asset_types(tmp_path) -> None:
+    narration = tmp_path / "narration.mp3"
+    music = tmp_path / "music.mp3"
+    narration.write_bytes(b"narration")
+    music.write_bytes(b"music")
+    inputs = _inputs()
+    inputs["asset_manifest"] = {
+        "version": "1.0",
+        "assets": [
+            {"id": "voice-1", "type": "narration", "scene_id": "scene-1", "path": str(narration)},
+            {"id": "music", "type": "music", "path": str(music)},
+        ],
+    }
+    props = RemotionMotionGraphics()._props(inputs)
+    assert props["scenes"][0]["audio_src"] == str(narration)
+    assert props["audio"]["music"]["src"] == str(music)
+
+
+def test_local_media_is_staged_under_remotion_public(tmp_path) -> None:
+    image = tmp_path / "scene.png"
+    narration = tmp_path / "narration.wav"
+    music = tmp_path / "music.wav"
+    image.write_bytes(b"image")
+    narration.write_bytes(b"narration")
+    music.write_bytes(b"music")
+    inputs = _inputs()
+    inputs["asset_manifest"] = {
+        "version": "1.0",
+        "assets": [
+            {"id": "img-1", "type": "image", "scene_id": "scene-1", "path": str(image)},
+            {"id": "voice-1", "type": "audio", "subtype": "narration", "scene_id": "scene-1", "path": str(narration)},
+            {"id": "music", "type": "audio", "subtype": "music", "path": str(music)},
+        ],
+    }
+    staged = RemotionMotionGraphics()._stage_props_public_assets(
+        RemotionMotionGraphics()._props(inputs),
+        tmp_path / "renders" / "final.mp4",
+    )
+    assert staged["scenes"][0]["visual"]["image_src"].startswith("councilforge-runtime/")
+    assert staged["scenes"][0]["audio_src"].startswith("councilforge-runtime/")
+    assert staged["audio"]["music"]["src"].startswith("councilforge-runtime/")
+
+
 def test_captioned_render_rejects_blank_narration(monkeypatch) -> None:
     tool = RemotionMotionGraphics()
     monkeypatch.setattr(tool, "get_status", lambda: ToolStatus.AVAILABLE)
