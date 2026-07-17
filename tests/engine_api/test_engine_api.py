@@ -600,6 +600,71 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
     assert replay.json()["execution_id"] == execution_id
 
 
+def test_capability_gateway_injects_workspace_local_remotion_paths(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-remotion-defaults")
+    workspace_id = workspace["workspace_id"]
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    remotion = registry.get("remotion_motion_graphics")
+    assert remotion is not None
+
+    seen_inputs: dict[str, object] = {}
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        seen_inputs.update(inputs)
+        output_dir = Path(str(inputs["output_dir"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / "composition-props.json"
+        output.write_text("{}", encoding="utf-8")
+        return ToolResult(success=True, data={"props_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(remotion, "execute", fake_execute)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="remotion-defaults"),
+        json={
+            "stage": "assets",
+            "tool_name": "remotion_motion_graphics",
+            "inputs": {
+                "operation": "prepare",
+                "title": "CouncilForge",
+                "objective": "Explain the platform",
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "title": "One brain",
+                        "narration": "CouncilForge plans, OpenMontage executes.",
+                        "description": "A clean platform workflow diagram.",
+                        "start_seconds": 0,
+                        "end_seconds": 1,
+                    }
+                ],
+                "render": {"width": 640, "height": 360, "fps": 24, "duration_seconds": 1},
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    output_dir = Path(str(seen_inputs["output_dir"]))
+    assert workspace_id in output_dir.parts
+    assert execution["artifacts"]
+    assert execution["artifacts"][0]["path"].startswith("tool-output/assets/remotion-motion/")
+
+
 def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: TestClient) -> None:
     workspace = create_workspace(client, key="workspace-cancel")
     workspace_id = workspace["workspace_id"]

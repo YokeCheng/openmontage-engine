@@ -398,6 +398,35 @@ class CapabilityGateway:
         result = {key: normalize(key, value) for key, value in inputs.items()}
         return result
 
+    def _workspace_default_inputs(
+        self,
+        workspace_dir: Path,
+        stage_name: str,
+        tool_name: str,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Provide safe workspace-local defaults for tools used through the API.
+
+        Several OpenMontage CLI tools historically defaulted to repo-level
+        folders such as ``assets/`` or ``renders/``.  That is fine for a local
+        Cursor/Claude workspace, but the service API must keep every produced
+        artifact inside the isolated workspace so tenant/path checks and Range
+        downloads continue to work.
+        """
+
+        if tool_name != "remotion_motion_graphics":
+            return inputs
+        result = dict(inputs)
+        operation = str(result.get("operation") or "")
+        if operation == "prepare" and not result.get("output_dir"):
+            result["output_dir"] = str(workspace_dir / "tool-output" / stage_name / "remotion-motion")
+        if operation == "render":
+            if not result.get("output_path"):
+                result["output_path"] = str(workspace_dir / "renders" / "final.mp4")
+            if not result.get("output_dir"):
+                result["output_dir"] = str(workspace_dir / "tool-output" / stage_name / "remotion-motion")
+        return result
+
     def create_execution(
         self,
         *,
@@ -427,7 +456,8 @@ class CapabilityGateway:
             raise RuntimeError("TOOL_UNAVAILABLE")
 
         workspace_dir = self._workspace_dir(workspace_id)
-        normalized_inputs = self._normalize_inputs(workspace_dir, inputs)
+        inputs_with_defaults = self._workspace_default_inputs(workspace_dir, stage_name, tool_name, inputs)
+        normalized_inputs = self._normalize_inputs(workspace_dir, inputs_with_defaults)
         execution_dir = workspace_dir / "executions"
         index_path = execution_dir / "idempotency.json"
         digest = canonical_digest({"stage": stage_name, "tool_name": tool_name, "inputs": normalized_inputs})
