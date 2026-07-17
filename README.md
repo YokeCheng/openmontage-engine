@@ -4,9 +4,9 @@
 
 OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calesthio/OpenMontage](https://github.com/calesthio/OpenMontage) 的完整源码演进。
 
-它不承担平台级用户交互、需求理解、模型决策或多智能体编排；这些职责统一由 CouncilForge 负责。OpenMontage Engine 接收结构化视频任务，执行素材处理、视频流水线、人工审批检查点、渲染、断点恢复和产物输出。
+它不承担平台级用户交互、需求理解、模型决策或多智能体编排；这些职责统一由 CouncilForge 负责。OpenMontage Engine 向 CouncilForge 提供原生 Pipeline、阶段 Director Skill、标准产物 Schema、工具契约、隔离工作区、Checkpoint、事件、渲染和产物输出。
 
-> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 提供 CouncilForge 专用的独立任务 API，通过统一执行清单接收全部 Pipeline 选择，并用本地 Remotion 真实渲染 MP4 与 SRT。
+> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 是无模型的能力边界。CouncilForge 按 Pipeline 阶段驱动工具并提交标准 Checkpoint，本地与云端工具的执行结果都由引擎验证和登记。
 
 ## 系统边界
 
@@ -14,8 +14,8 @@ OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calest
 用户 / 业务系统
       │
       ▼
-CouncilForge（唯一 Agent 大脑）
-      │  REST / Event / 临时任务凭证
+CouncilForge（唯一 Agent 大脑与流程控制器）
+      │  Pipeline / Tool / Checkpoint / Event
       ▼
 OpenMontage Engine（视频执行引擎）
       │
@@ -26,7 +26,7 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 职责原则：
 
 - CouncilForge 负责需求理解、模型调用、Agent 决策、权限、审批和业务编排；
-- OpenMontage Engine 负责视频流水线、素材处理、进度、检查点、渲染和产物；
+- OpenMontage Engine 负责 Pipeline 与 Skill 说明、素材工具、生产工作区、进度、检查点、渲染和产物；
 - 两个项目保持独立仓库、独立容器、独立依赖和独立发布流程；
 - OpenMontage Engine 不保存平台级大模型密钥，只接受单次任务参数和临时凭证；
 - 两个项目通过稳定协议通信，不将 OpenMontage 源码复制进 CouncilForge。
@@ -49,15 +49,34 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 
 ## CouncilForge Engine API v1
 
-服务位于 `engine_api/`，运行状态保存在 Git 忽略的 `.engine-runtime/`。它提供幂等任务创建、脚本/预算审批、待处理动作、取消、事件、有界并发、重启恢复、租户隔离以及支持 Range 的多产物读取。任务凭证是只写字段，不会进入快照、事件或产物。
+服务位于 `engine_api/`，生产工作区保存在 Git 忽略的 `.engine-runtime/`。它提供幂等 Workspace、阶段上下文、工具查询与执行、Checkpoint、事件、取消、重启恢复、租户隔离、媒体探测以及支持 Range 的产物读取。供应商凭证只存在于进程内存，不会进入 Workspace、Checkpoint、事件或产物。
 
 ```bash
 .venv/bin/python -m uvicorn engine_api.app:app --host 127.0.0.1 --port 8100
 ```
 
-API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取 OpenMontage 的全部 Pipeline，创建任务时会校验所选 Pipeline；CouncilForge 将这些创作流程归一为同一份已审批执行清单，由引擎确定性渲染。`platform_managed` 模式直接执行已经由 CouncilForge 审批的清单；`engine_managed` 模式保留引擎自己的审批检查点。当前零密钥执行路径真实输出 H.264/AAC MP4 和逐镜头 SRT；云端图片、视频、TTS 与音乐能力按工具注册表实时报告，未配置时明确标记不可用。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
+API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/workspaces` 提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。每次工具执行必须属于当前 Pipeline 阶段的工具白名单，路径限制在租户 Workspace 内，幂等键防止重复执行。标准阶段产物在写入完成或待审批 Checkpoint 前按 `schemas/artifacts/` 验证。当前零密钥 Remotion 路径可真实输出 H.264/AAC MP4 和 SRT；云端图片、视频、TTS 与音乐能力按工具注册表实时报告。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
 
-## 演进路线
+## 当前平台接入
+
+CouncilForge 使用以下能力接口驱动 OpenMontage，而不是在引擎中启动第二个 Agent：
+
+```text
+GET  /v1/tools
+GET  /v1/agent-skills/{skill_name}
+POST /v1/workspaces
+GET  /v1/workspaces/{workspace_id}/stages/{stage}/context
+POST /v1/workspaces/{workspace_id}/executions
+PUT  /v1/workspaces/{workspace_id}/checkpoint
+GET  /v1/workspaces/{workspace_id}/events
+POST /v1/workspaces/{workspace_id}/cancel
+GET  /v1/workspaces/{workspace_id}/artifacts
+GET  /v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content
+```
+
+旧 `/v1/jobs` 清单执行 API 继续保留，用于兼容已创建任务和零密钥回归。新建 CouncilForge 视频任务默认使用 Workspace 阶段式运行时。
+
+## 上游与长期演进
 
 ### Phase 0：稳定工程基线
 
@@ -66,47 +85,13 @@ API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取 
 - 建立 `main`、`develop` 和基线标签；
 - 每次升级固定到明确 Commit，并在合并前完成回归验证。
 
-### Phase 1：轻服务化
+### 后续维护原则
 
-第一版在现有 CLI、流水线和 checkpoint 机制外增加最小服务接口：
-
-```text
-GET  /health
-GET  /capabilities
-GET  /pipelines
-POST /jobs
-GET  /jobs/{job_id}
-GET  /jobs
-POST /jobs/{job_id}/approve
-POST /jobs/{job_id}/cancel
-GET  /jobs/{job_id}/actions
-POST /jobs/{job_id}/actions/{action_id}/resolve
-GET  /jobs/{job_id}/artifacts
-GET  /jobs/{job_id}/artifacts/{artifact_id}/content
-GET  /jobs/{job_id}/events
-```
-
-统一任务状态：
-
-```text
-created → planning → running → waiting_approval / waiting_action → rendering
-        → succeeded / failed / cancelled
-```
-
-### Phase 2：CouncilForge 接入
-
-- 定义任务、状态、审批、事件和产物协议；
-- 在 CouncilForge 中增加视频生产 Skill 和 OpenMontage 客户端；
-- 打通提交任务、进度查询、人工审批和产物回传；
-- 使用 Docker Compose 验证双容器部署。
-
-### Phase 3：深度引擎化
-
-- 标准任务节点、持久化状态和可靠重试；
-- 暂停、恢复、取消、并发队列和资源限制；
-- 对象存储、实时事件、多租户、配额和审计；
-- 可注册的视频流水线插件；
-- 将所有业务决策和模型调用彻底上移到 CouncilForge。
+- 保持工具和 Pipeline 可通过注册表扩展，不在 CouncilForge 复制实现；
+- OpenMontage 工作区只保存生产期状态，平台业务状态和长期产物分别进入 PostgreSQL 与对象存储；
+- 新工具必须声明输入、输出、可用状态和 Agent 指导，并通过阶段白名单调用；
+- 继续完善并发资源限制、分布式 Worker、工作区保留策略和生产监控；
+- 所有业务决策和模型调用始终位于 CouncilForge。
 
 ## 许可证说明
 

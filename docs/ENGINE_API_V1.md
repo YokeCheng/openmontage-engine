@@ -8,6 +8,22 @@
 
 OpenMontage Engine 是异步视频执行引擎，不是第二个 Agent 大脑。CouncilForge 完成用户需求理解、内容决策、模型推理和业务编排，再向引擎提交结构化、可执行的视频任务。
 
+新建 CouncilForge 视频任务使用能力 Workspace 协议：CouncilForge 的 Agent 读取 OpenMontage Pipeline 当前阶段的 Director Skill、产物 Schema 和工具契约，调用允许的媒体工具，并将标准阶段产物写入 Checkpoint。OpenMontage 不调用模型，也不决定跨阶段流程。
+
+## Capability Workspace API
+
+- `GET /v1/tools`、`GET /v1/tools/{tool_name}`：读取工具契约和实时可用状态；
+- `GET /v1/agent-skills/{skill_name}`：读取工具声明的运行指导；
+- `POST /v1/workspaces`、`GET /v1/workspaces/{workspace_id}`：创建和读取租户隔离的生产工作区；
+- `GET /v1/workspaces/{workspace_id}/stages/{stage}/context`：读取当前阶段说明、允许工具和产物 Schema；
+- `POST /v1/workspaces/{workspace_id}/executions`：幂等执行当前阶段允许的一个工具；
+- `GET/PUT /v1/workspaces/{workspace_id}/checkpoint`：读取或写入标准阶段 Checkpoint；
+- `GET /v1/workspaces/{workspace_id}/events`：按序列读取 JSON 事件或订阅 SSE；
+- `POST /v1/workspaces/{workspace_id}/cancel`：取消工作区及其活动工具执行；
+- `GET /v1/workspaces/{workspace_id}/artifacts`：读取产物索引；内容接口支持 HTTP Range。
+
+完成或待审批 Checkpoint 必须包含该阶段声明的全部标准产物，并通过 `schemas/artifacts/` 中的 JSON Schema。工具文件路径只能位于对应 Workspace；HTTP、HTTPS 和 data URL 可作为远程输入，但不会被解释为本地路径。
+
 v1 协议必须满足：
 
 - 提交操作可幂等重试；

@@ -1,5 +1,22 @@
 # Compose Director — Explainer Pipeline
 
+## Runtime-native motion graphics
+
+If `asset_manifest.metadata.composition` is `CouncilForgePlatform`, call
+`remotion_motion_graphics` with `operation="render"` and the approved scenes
+and render specification. Persist the tool's returned `render_report` and
+`final_review` directly after checking their schemas. This is the native
+zero-key Remotion path; do not route those scene JSON assets through
+`video_compose` as if they were source footage.
+
+Build render scenes by joining `scene_plan.scenes[]` to
+`script.sections[]` through `script_section_id`. Each scene must carry the
+approved script text as `narration` plus its original start/end timing. When
+subtitles are enabled, also preserve the approved scene `description` and use
+the linked script-section label as `title`. Blank narration, blank visual
+descriptions, or a scene-duration sum that differs from the approved render
+duration is a blocking error, never a warning.
+
 ## When to Use
 
 You are the Compositor for a generated explainer video. You have `edit_decisions` with the complete edit timeline and an `asset_manifest` with all file paths. Your job is to render the final video: assemble visuals, layer audio, burn subtitles, and encode to the target format.

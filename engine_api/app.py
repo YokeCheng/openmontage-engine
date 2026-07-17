@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -18,7 +19,17 @@ import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from .models import ApproveRequest, CancelRequest, CreateJobRequest, ResolveActionRequest, RuntimeConfigRequest
+from .capability_gateway import CapabilityGateway
+from .models import (
+    ApproveRequest,
+    CancelRequest,
+    CreateJobRequest,
+    CreateToolExecutionRequest,
+    CreateWorkspaceRequest,
+    ResolveActionRequest,
+    RuntimeConfigRequest,
+    WriteWorkspaceCheckpointRequest,
+)
 from .scheduler import ExecutionScheduler
 from .store import EngineStore, TERMINAL, new_id, utc_now
 
@@ -46,6 +57,7 @@ def _pipeline_catalog() -> list[dict[str, Any]]:
                 "stability": data.get("stability") or ("test" if path.stem == "framework-smoke" else "production"),
                 "stages": [stage.get("name") if isinstance(stage, dict) else stage for stage in stages],
                 "execution_contract": "normalized-video-manifest",
+                "agent_execution_contract": "capability-gateway-v1",
             }
         )
     return catalog
@@ -200,16 +212,24 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
     root = runtime_root or Path(os.getenv("OPENMONTAGE_ENGINE_RUNTIME", REPO_ROOT / ".engine-runtime"))
     store = EngineStore(root)
     scheduler = ExecutionScheduler(store, REPO_ROOT)
+    gateway = CapabilityGateway(
+        root / "capability-gateway",
+        REPO_ROOT,
+        max_workers=max(1, int(os.getenv("OPENMONTAGE_TOOL_MAX_WORKERS", "2"))),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         scheduler.recover()
+        gateway.recover()
         yield
         scheduler.shutdown()
+        gateway.shutdown()
 
     app = FastAPI(title="OpenMontage Engine API", version="1.0.0", lifespan=lifespan)
     app.state.store = store
     app.state.scheduler = scheduler
+    app.state.capability_gateway = gateway
 
     async def authorize_service(
         authorization: str | None = Header(default=None),
@@ -241,7 +261,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         menu = await asyncio.to_thread(_provider_capabilities)
         return {
             "schema_version": "1.0",
-            "role": "deterministic-video-executor",
+            "role": "model-free-video-capability-environment",
             "formats": ["product_intro", "knowledge_explainer"],
             "scheduler": {"kind": "bounded-worker-pool", "max_workers": scheduler.max_workers, "restart_recovery": True},
             # These are the runtimes implemented by the normalized manifest
@@ -257,6 +277,8 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             "setup_offers": menu.get("setup_offers", []),
             "runtime_warnings": menu.get("runtime_warnings", []),
             "requires_model_credentials": False,
+            "agent_host": "external",
+            "tool_execution_api": "capability-gateway-v1",
         }
 
     @app.get("/v1/providers")
@@ -321,6 +343,210 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         except (FileNotFoundError, ValueError):
             return problem(404, "Pipeline not found", "The requested pipeline does not exist.", "PIPELINE_NOT_FOUND", request)
         return JSONResponse(content=bundle)
+
+    @app.get("/v1/tools")
+    async def tools_catalog(_: None = Depends(authorize_service)) -> dict[str, Any]:
+        return {"tools": await asyncio.to_thread(gateway.tool_catalog)}
+
+    @app.get("/v1/tools/{tool_name}")
+    async def tool_contract(tool_name: str, _: None = Depends(authorize_service)) -> dict[str, Any]:
+        tool = await asyncio.to_thread(gateway.tool_info, tool_name)
+        if tool is None:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return tool
+
+    @app.get("/v1/agent-skills/{skill_name}")
+    async def agent_skill(skill_name: str, _: None = Depends(authorize_service)) -> dict[str, Any]:
+        skill = await asyncio.to_thread(gateway.agent_skill, skill_name)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Agent skill not found")
+        return skill
+
+    @app.post("/v1/workspaces", status_code=201)
+    async def create_workspace(
+        body: CreateWorkspaceRequest,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+        idempotency_key: str | None = Header(default=None),
+    ) -> JSONResponse:
+        if not idempotency_key:
+            return problem(400, "Missing idempotency key", "Idempotency-Key is required.", "IDEMPOTENCY_KEY_REQUIRED", request)
+        try:
+            workspace, created = await asyncio.to_thread(
+                gateway.create_workspace,
+                tenant_id=tenant_id,
+                idempotency_key=idempotency_key,
+                request_id=body.request_id,
+                title=body.title,
+                pipeline=body.pipeline,
+                metadata=body.metadata,
+            )
+        except FileNotFoundError:
+            return problem(404, "Pipeline not found", "The requested pipeline does not exist.", "PIPELINE_NOT_FOUND", request)
+        except ValueError as exc:
+            if str(exc) == "IDEMPOTENCY_KEY_REUSED":
+                return problem(409, "Idempotency key reused", "This key was already used with a different request body.", "IDEMPOTENCY_KEY_REUSED", request)
+            return problem(422, "Invalid workspace", str(exc), "WORKSPACE_INVALID", request)
+        return JSONResponse(status_code=201 if created else 200, content=workspace)
+
+    @app.get("/v1/workspaces/{workspace_id}")
+    async def get_workspace(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        workspace = await asyncio.to_thread(gateway.load_workspace, workspace_id, tenant_id)
+        if workspace is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        return workspace
+
+    @app.get("/v1/workspaces/{workspace_id}/stages/{stage_name}/context")
+    async def stage_context(workspace_id: str, stage_name: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(gateway.stage_context, workspace_id, tenant_id, stage_name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=f"Pipeline skill is unavailable: {exc}") from exc
+
+    @app.post("/v1/workspaces/{workspace_id}/executions", status_code=202)
+    async def create_tool_execution(
+        workspace_id: str,
+        body: CreateToolExecutionRequest,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+        idempotency_key: str | None = Header(default=None),
+    ) -> JSONResponse:
+        if not idempotency_key:
+            return problem(400, "Missing idempotency key", "Idempotency-Key is required.", "IDEMPOTENCY_KEY_REQUIRED", request)
+        try:
+            execution, created = await asyncio.to_thread(
+                gateway.create_execution,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                idempotency_key=idempotency_key,
+                stage_name=body.stage,
+                tool_name=body.tool_name,
+                inputs=body.inputs,
+            )
+        except KeyError as exc:
+            return problem(404, "Capability not found", str(exc.args[0]), str(exc.args[0]), request)
+        except PermissionError:
+            return problem(403, "Tool is not allowed", "The pipeline stage does not allow this tool.", "TOOL_NOT_ALLOWED_FOR_STAGE", request)
+        except ValueError as exc:
+            code = str(exc)
+            status = 409 if code == "IDEMPOTENCY_KEY_REUSED" else 422
+            return problem(status, "Tool execution rejected", code, code, request)
+        except RuntimeError as exc:
+            return problem(409, "Tool is unavailable", str(exc), "TOOL_UNAVAILABLE", request)
+        return JSONResponse(status_code=202 if created else 200, content=execution)
+
+    @app.get("/v1/workspaces/{workspace_id}/executions/{execution_id}")
+    async def get_tool_execution(workspace_id: str, execution_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(gateway.get_execution, workspace_id, tenant_id, execution_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/v1/workspaces/{workspace_id}/executions/{execution_id}/cancel")
+    async def cancel_tool_execution(workspace_id: str, execution_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(gateway.cancel_execution, workspace_id, tenant_id, execution_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/v1/workspaces/{workspace_id}/cancel")
+    async def cancel_workspace(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(gateway.cancel_workspace, workspace_id, tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/v1/workspaces/{workspace_id}/events")
+    async def workspace_events(
+        workspace_id: str,
+        request: Request,
+        after_sequence: int = Query(default=0, ge=0),
+        tenant_id: str = Depends(authorize),
+    ) -> Any:
+        if await asyncio.to_thread(gateway.load_workspace, workspace_id, tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        if "text/event-stream" not in request.headers.get("accept", ""):
+            items = await asyncio.to_thread(gateway.events, workspace_id, tenant_id, after_sequence)
+            return {"events": items, "next_sequence": items[-1]["sequence"] if items else after_sequence}
+
+        async def stream_workspace_events() -> AsyncIterator[str]:
+            cursor = after_sequence
+            while not await request.is_disconnected():
+                items = await asyncio.to_thread(gateway.events, workspace_id, tenant_id, cursor)
+                for event in items:
+                    cursor = event["sequence"]
+                    yield f"id: {cursor}\nevent: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(stream_workspace_events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+    @app.put("/v1/workspaces/{workspace_id}/checkpoint")
+    async def write_workspace_checkpoint(
+        workspace_id: str,
+        body: WriteWorkspaceCheckpointRequest,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+    ) -> JSONResponse:
+        try:
+            checkpoint = await asyncio.to_thread(gateway.write_checkpoint, workspace_id, tenant_id, body.model_dump())
+        except KeyError:
+            return problem(404, "Workspace not found", "The requested workspace does not exist.", "WORKSPACE_NOT_FOUND", request)
+        except (ValueError, TypeError) as exc:
+            return problem(422, "Checkpoint rejected", str(exc), "CHECKPOINT_INVALID", request)
+        return JSONResponse(content=checkpoint)
+
+    @app.get("/v1/workspaces/{workspace_id}/checkpoint")
+    async def latest_workspace_checkpoint(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            checkpoint = await asyncio.to_thread(gateway.latest_checkpoint, workspace_id, tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Workspace not found") from exc
+        return {"checkpoint": checkpoint}
+
+    @app.get("/v1/workspaces/{workspace_id}/artifacts")
+    async def workspace_artifacts(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
+        try:
+            items = await asyncio.to_thread(gateway.artifacts, workspace_id, tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Workspace not found") from exc
+        return {"artifacts": items}
+
+    @app.get("/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content")
+    async def workspace_artifact_content(
+        workspace_id: str,
+        artifact_id: str,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+    ) -> Response:
+        path = await asyncio.to_thread(gateway.artifact_path, workspace_id, tenant_id, artifact_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        range_header = request.headers.get("range")
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            size = path.stat().st_size
+            if not match:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            start_text, end_text = match.groups()
+            if not start_text and not end_text:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            if start_text:
+                start = int(start_text)
+                end = min(int(end_text), size - 1) if end_text else size - 1
+            else:
+                suffix = min(int(end_text), size)
+                start, end = size - suffix, size - 1
+            if start >= size or end < start:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            with path.open("rb") as handle:
+                handle.seek(start)
+                content = handle.read(end - start + 1)
+            return Response(content, status_code=206, media_type=media_type, headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(len(content))})
+        return FileResponse(path, media_type=media_type, filename=path.name, headers={"Accept-Ranges": "bytes"})
 
     @app.get("/v1/jobs")
     async def list_jobs(tenant_id: str = Depends(authorize)) -> dict[str, Any]:

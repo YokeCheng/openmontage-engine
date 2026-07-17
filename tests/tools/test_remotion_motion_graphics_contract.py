@@ -1,0 +1,65 @@
+from tools.base_tool import ToolStatus
+from tools.video.remotion_motion_graphics import RemotionMotionGraphics
+
+
+def _inputs() -> dict:
+    return {
+        "operation": "prepare",
+        "title": "Test",
+        "objective": "Verify caption contract",
+        "subtitles": True,
+        "scenes": [
+            {
+                "scene_id": "scene-1",
+                "title": "Hook",
+                "narration": "第一段字幕",
+                "description": "开场标题与断裂连线动画",
+                "start_seconds": 0,
+                "end_seconds": 5,
+            },
+            {
+                "scene_id": "scene-2",
+                "title": "Setup",
+                "narration": "第二段字幕",
+                "description": "CouncilForge 决策中枢图",
+                "start_seconds": 5,
+                "end_seconds": 11,
+            },
+        ],
+        "render": {"width": 1920, "height": 1080, "fps": 30, "duration_seconds": 11},
+    }
+
+
+def test_scene_duration_is_derived_from_approved_timeline() -> None:
+    props = RemotionMotionGraphics()._props(_inputs())
+    assert [scene["duration_seconds"] for scene in props["scenes"]] == [5.0, 6.0]
+
+
+def test_captioned_render_rejects_blank_narration(monkeypatch) -> None:
+    tool = RemotionMotionGraphics()
+    monkeypatch.setattr(tool, "get_status", lambda: ToolStatus.AVAILABLE)
+    inputs = _inputs()
+    inputs["scenes"][1]["narration"] = ""
+    result = tool.execute(inputs)
+    assert result.success is False
+    assert "narration is missing" in str(result.error)
+
+
+def test_render_rejects_timeline_duration_drift(monkeypatch) -> None:
+    tool = RemotionMotionGraphics()
+    monkeypatch.setattr(tool, "get_status", lambda: ToolStatus.AVAILABLE)
+    inputs = _inputs()
+    inputs["render"]["duration_seconds"] = 30
+    result = tool.execute(inputs)
+    assert result.success is False
+    assert "does not match render duration" in str(result.error)
+
+
+def test_render_rejects_blank_visual_description(monkeypatch) -> None:
+    tool = RemotionMotionGraphics()
+    monkeypatch.setattr(tool, "get_status", lambda: ToolStatus.AVAILABLE)
+    inputs = _inputs()
+    inputs["scenes"][0]["description"] = ""
+    result = tool.execute(inputs)
+    assert result.success is False
+    assert "visual description is missing" in str(result.error)

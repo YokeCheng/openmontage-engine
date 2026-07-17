@@ -97,3 +97,37 @@ class RuntimeConfigRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     values: dict[str, str | None] = Field(default_factory=dict, max_length=128)
+
+
+class CreateWorkspaceRequest(BaseModel):
+    """Create an isolated OpenMontage production workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=240)
+    title: str = Field(min_length=1, max_length=240)
+    pipeline: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateToolExecutionRequest(BaseModel):
+    """Run one registry tool within a declared pipeline stage."""
+
+    model_config = ConfigDict(extra="forbid")
+    stage: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    tool_name: str = Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class WriteWorkspaceCheckpointRequest(BaseModel):
+    """Persist an agent-authored canonical OpenMontage checkpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+    stage: str = Field(min_length=1, max_length=120)
+    status: Literal["in_progress", "awaiting_human", "completed", "failed"]
+    artifacts: dict[str, Any] = Field(default_factory=dict)
+    human_approval_required: bool = False
+    human_approved: bool = False
+    review: dict[str, Any] | None = None
+    cost_snapshot: dict[str, Any] | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

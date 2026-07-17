@@ -22,6 +22,61 @@
         "cancelled"
       ]
     },
+    "workspace": {
+      "type": "object",
+      "required": ["schema_version", "workspace_id", "request_id", "tenant_id", "title", "pipeline", "status", "created_at", "updated_at"],
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0" },
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "pipeline": { "$ref": "#/$defs/pipeline_ref" },
+        "status": { "type": "string", "enum": ["active", "cancelled", "archived"] },
+        "metadata": { "type": "object" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "tool_execution": {
+      "type": "object",
+      "required": ["schema_version", "execution_id", "workspace_id", "tenant_id", "pipeline", "stage", "tool_name", "status", "inputs_digest", "artifacts", "created_at", "updated_at"],
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0" },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "pipeline": { "$ref": "#/$defs/pipeline_ref" },
+        "stage": { "type": "string", "minLength": 1 },
+        "tool_name": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["queued", "running", "cancel_requested", "succeeded", "failed", "cancelled"] },
+        "inputs_digest": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "result": { "type": ["object", "null"] },
+        "error": { "type": ["object", "null"] },
+        "artifacts": { "type": "array", "items": { "type": "object" } },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "workspace_event": {
+      "type": "object",
+      "required": ["schema_version", "event_id", "workspace_id", "tenant_id", "sequence", "type", "occurred_at", "data"],
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0" },
+        "event_id": { "type": "string", "minLength": 1 },
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "data": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
     "pipeline_ref": {
       "type": "object",
       "required": ["name"],

@@ -1,5 +1,23 @@
 # Asset Director — Explainer Pipeline
 
+## Runtime-native motion graphics
+
+When the approved visual source is motion graphics and the brief explicitly
+disables external voice and music, use the available
+`remotion_motion_graphics` tool with `operation="prepare"`. Its scene JSON
+files are real runtime-native assets, not placeholders: persist the returned
+`asset_manifest` directly, verify every returned path exists, and record zero
+provider cost. Do not require `image_selector` or `tts_selector` for this
+approved no-provider path.
+
+Before calling the tool, join every `scene_plan.scenes[]` item to the approved
+`script.sections[]` item named by `script_section_id`. Pass the script text as
+the scene's non-empty `narration`, preserve `start_seconds` and `end_seconds`,
+preserve the scene's approved `description`, use the script section label as
+the scene `title`, and set `subtitles=true` when the brief enables captions.
+Never replace these values with equal placeholder durations, blank narration,
+or blank/generic visual descriptions.
+
 ## When to Use
 
 You are the Asset Producer for a generated explainer video. You have a `scene_plan` with required assets and a `script` with narration text. Your job is to generate every asset needed: narration audio, images, diagrams, code snippets, and background music. Every file must exist on disk before you finish.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -398,3 +397,228 @@ def test_action_resolution_cancel_event_sequence_and_restart_recovery(client: Te
     recovered = restarted.get(f"/v1/jobs/{job['job_id']}", headers={"X-Tenant-ID": "tenant-a"})
     assert recovered.status_code == 200
     assert recovered.json()["status"] == "cancelled"
+
+
+def create_workspace(
+    client: TestClient,
+    *,
+    tenant: str = "tenant-a",
+    key: str = "workspace-1",
+    title: str = "Agent-hosted explainer",
+) -> dict:
+    response = client.post(
+        "/v1/workspaces",
+        headers=headers(tenant, key),
+        json={
+            "request_id": "video-task-1",
+            "title": title,
+            "pipeline": "animated-explainer",
+            "metadata": {"platform_task_id": "video-task-1"},
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_skill(client: TestClient) -> None:
+    workspace = create_workspace(client)
+    replay = client.post(
+        "/v1/workspaces",
+        headers=headers(key="workspace-1"),
+        json={
+            "request_id": "video-task-1",
+            "title": "Agent-hosted explainer",
+            "pipeline": "animated-explainer",
+            "metadata": {"platform_task_id": "video-task-1"},
+        },
+    )
+    assert replay.status_code == 200
+    assert replay.json()["workspace_id"] == workspace["workspace_id"]
+
+    conflict = client.post(
+        "/v1/workspaces",
+        headers=headers(key="workspace-1"),
+        json={
+            "request_id": "video-task-1",
+            "title": "Different title",
+            "pipeline": "animated-explainer",
+            "metadata": {},
+        },
+    )
+    assert conflict.status_code == 409
+    assert client.get(
+        f"/v1/workspaces/{workspace['workspace_id']}",
+        headers={"X-Tenant-ID": "tenant-b"},
+    ).status_code == 404
+
+    context = client.get(
+        f"/v1/workspaces/{workspace['workspace_id']}/stages/assets/context",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert context.status_code == 200
+    payload = context.json()
+    assert payload["stage"]["name"] == "assets"
+    assert "asset" in payload["instruction"].lower()
+    assert {tool["name"] for tool in payload["tools"]} >= {"diagram_gen", "image_selector", "tts_selector"}
+    assert payload["artifact_schemas"]["asset_manifest"]["title"]
+
+
+def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-execution")
+    workspace_id = workspace["workspace_id"]
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    diagram = registry.get("diagram_gen")
+    assert diagram is not None
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        output = Path(inputs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"agent-hosted-openmontage-artifact")
+        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(diagram, "execute", fake_execute)
+    rejected = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="not-allowed"),
+        json={"stage": "research", "tool_name": "diagram_gen", "inputs": {}},
+    )
+    assert rejected.status_code == 403
+
+    escaped = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="escaped"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "inputs": {"output_path": "../../outside.png"},
+        },
+    )
+    assert escaped.status_code == 422
+    assert escaped.json()["error_code"] == "TOOL_PATH_OUTSIDE_WORKSPACE"
+
+    nested_escape = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="nested-escaped"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "inputs": {"options": {"output_path": "../../nested-outside.png"}},
+        },
+    )
+    assert nested_escape.status_code == 422
+    assert nested_escape.json()["error_code"] == "TOOL_PATH_OUTSIDE_WORKSPACE"
+
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="diagram-1"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "inputs": {
+                "diagram_type": "boxes",
+                "boxes": [{"label": "CouncilForge"}, {"label": "OpenMontage"}],
+                "output_path": "assets/images/architecture.png",
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    assert execution["artifacts"]
+    assert execution["artifacts"][0]["checksum"]
+    assert "metadata" in execution["artifacts"][0]
+    artifact_id = execution["artifacts"][0]["artifact_id"]
+    ranged = client.get(
+        f"/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content",
+        headers={"X-Tenant-ID": "tenant-a", "Range": "bytes=0-4"},
+    )
+    assert ranged.status_code == 206
+    assert ranged.content == b"agent"
+
+    replay = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="diagram-1"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "inputs": {
+                "diagram_type": "boxes",
+                "boxes": [{"label": "CouncilForge"}, {"label": "OpenMontage"}],
+                "output_path": "assets/images/architecture.png",
+            },
+        },
+    )
+    assert replay.status_code == 200
+    assert replay.json()["execution_id"] == execution_id
+
+
+def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: TestClient) -> None:
+    workspace = create_workspace(client, key="workspace-cancel")
+    workspace_id = workspace["workspace_id"]
+    foreign = client.post(
+        f"/v1/workspaces/{workspace_id}/cancel",
+        headers={"X-Tenant-ID": "tenant-b"},
+    )
+    assert foreign.status_code == 404
+    cancelled = client.post(
+        f"/v1/workspaces/{workspace_id}/cancel",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    replay = client.post(
+        f"/v1/workspaces/{workspace_id}/cancel",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert replay.status_code == 200
+    current = client.get(
+        f"/v1/workspaces/{workspace_id}",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert current.json()["status"] == "cancelled"
+
+
+def test_agent_layer_three_skill_checkpoint_and_workspace_event_sequence(client: TestClient) -> None:
+    workspace = create_workspace(client, key="workspace-checkpoint")
+    workspace_id = workspace["workspace_id"]
+    skill = client.get("/v1/agent-skills/remotion-best-practices")
+    assert skill.status_code == 200
+    assert skill.json()["content"]
+    assert client.get("/v1/agent-skills/../secrets").status_code == 404
+
+    checkpoint = client.put(
+        f"/v1/workspaces/{workspace_id}/checkpoint",
+        headers={"X-Tenant-ID": "tenant-a"},
+        json={
+            "stage": "research",
+            "status": "in_progress",
+            "artifacts": {},
+            "metadata": {"agent_run_id": "run-1"},
+        },
+    )
+    assert checkpoint.status_code == 200
+    latest = client.get(
+        f"/v1/workspaces/{workspace_id}/checkpoint",
+        headers={"X-Tenant-ID": "tenant-a"},
+    ).json()["checkpoint"]
+    assert latest["stage"] == "research"
+    assert latest["status"] == "in_progress"
+    events = client.get(
+        f"/v1/workspaces/{workspace_id}/events",
+        headers={"X-Tenant-ID": "tenant-a"},
+    ).json()["events"]
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
