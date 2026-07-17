@@ -21,9 +21,9 @@ default_checkpoint_policy: guided
 
 platform_contract:
   version: "1.0"
-  readiness: requires_input_adapter
-  intake_adapter: screen-demo-source-brief-v1
-  status_reason: "requires_source_materials: screen_recording_or_terminal_script"
+  readiness: ready
+  intake_adapter: councilforge-source-materials-v1
+  status_reason: "Ready when the CouncilForge brief includes a screen recording or terminal demo script source material."
   input_modes:
     - source_materials
     - screen_recording

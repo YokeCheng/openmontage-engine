@@ -327,7 +327,8 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
     assert talking_head["required_source_materials"] == ["raw_talking_head_video"]
 
     screen_demo = pipelines["screen-demo"]["platform_contract"]
-    assert screen_demo["readiness"] == "requires_input_adapter"
+    assert screen_demo["readiness"] == "ready"
+    assert screen_demo["intake_adapter"] == "councilforge-source-materials-v1"
     assert screen_demo["required_source_materials"] == [
         "screen_recording_or_terminal_script"
     ]
