@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from engine_api.app import create_app
-from engine_api.store import new_id, utc_now
+from engine_api.renderer import MediaActionRequired, _materialize_media, _render_contract
+from engine_api.store import EngineStore, new_id, utc_now
+from tools.base_tool import ToolResult
 
 
 def manifest(title: str = "CouncilForge") -> dict:
@@ -33,6 +35,132 @@ def manifest(title: str = "CouncilForge") -> dict:
         "budget": {"maximum_usd": 0},
         "fallback_policy": {"video_generation": ["motion_graphics"]},
     }
+
+
+def test_render_contract_routes_canonical_edit_decisions_to_existing_explainer() -> None:
+    payload = manifest()
+    payload["pipeline_artifacts"] = {
+        "edit_decisions": {
+            "version": "1.0",
+            "render_runtime": "remotion",
+            "cuts": [
+                {
+                    "id": "scene-01",
+                    "source": "",
+                    "in_seconds": 0,
+                    "out_seconds": 1,
+                    "type": "hero_title",
+                    "text": "真实场景",
+                }
+            ],
+        }
+    }
+    composition_id, props = _render_contract(payload)
+    assert composition_id == "Explainer"
+    assert props["cuts"][0]["type"] == "hero_title"
+    assert props["render"]["width"] == 640
+
+
+def test_render_contract_keeps_legacy_manifest_fallback() -> None:
+    composition_id, props = _render_contract(manifest())
+    assert composition_id == "CouncilForgePlatform"
+    assert props["title"] == "CouncilForge"
+
+
+def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeImageSelector:
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"generated-image")
+            return ToolResult(
+                success=True,
+                data={"output": str(output), "selected_provider": "test-provider"},
+                artifacts=[str(output)],
+            )
+
+    from tools.tool_registry import registry
+
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(
+        registry,
+        "get",
+        lambda name: FakeImageSelector() if name == "image_selector" else None,
+    )
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "test-provider",
+        "voice_provider": "none",
+        "music_provider": "none",
+    }
+    props = {
+        "cuts": [
+            {
+                "id": "scene-01",
+                "source": "",
+                "in_seconds": 0,
+                "out_seconds": 1,
+                "type": "hero_title",
+                "text": "Scene",
+            }
+        ]
+    }
+    store = EngineStore(tmp_path / "runtime")
+    job = {"job_id": "job-media", "tenant_id": "tenant-a", "correlation_id": "corr"}
+    assets = _materialize_media(payload, props, tmp_path / "assets", store, job)
+    assert props["cuts"][0]["backgroundImage"].endswith("scene-01.png")
+    assert assets[0]["provider"] == "test-provider"
+    assert store.events("job-media")[0]["type"] == "media.asset_ready"
+
+
+def test_unavailable_approved_media_pauses_for_fallback_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Unavailable:
+        value = "unavailable"
+
+    class FakeImageSelector:
+        def get_status(self) -> Unavailable:
+            return Unavailable()
+
+    from tools.tool_registry import registry
+
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(registry, "get", lambda name: FakeImageSelector())
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "test-provider",
+        "voice_provider": "none",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    props = {"cuts": [{"id": "scene-01", "in_seconds": 0, "out_seconds": 1}]}
+    store = EngineStore(tmp_path / "runtime")
+    job = {
+        "job_id": "job-media",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "status": "rendering",
+        "stage": "media",
+        "progress": {"percent": 52, "message": "media", "updated_at": utc_now()},
+    }
+    store.save_job(job)
+    with pytest.raises(MediaActionRequired):
+        _materialize_media(payload, props, tmp_path / "assets", store, job)
+    paused = store.load_job("job-media")
+    assert paused is not None
+    assert paused["status"] == "waiting_action"
+    assert paused["actions"][0]["recommended_resolution"] == "use_motion_graphics"
 
 
 def request_body(
@@ -133,6 +261,52 @@ def test_registered_upstream_pipeline_is_accepted_and_unknown_pipeline_is_reject
     )
     assert rejected.status_code == 400
     assert rejected.json()["error_code"] == "PIPELINE_NOT_REGISTERED"
+
+
+def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephemeral(
+    client: TestClient,
+) -> None:
+    catalog = client.get("/v1/providers")
+    assert catalog.status_code == 200
+    providers = catalog.json()["providers"]
+    pixabay = next(item for item in providers if item["provider"] == "pixabay")
+    assert "image_generation" in pixabay["capabilities"]
+    assert "PIXABAY_API_KEY" in pixabay["credential_fields"]
+
+    try:
+        configured = client.put(
+            "/v1/runtime/config",
+            json={"values": {"PIXABAY_API_KEY": "runtime-only-secret"}},
+        )
+        assert configured.status_code == 200
+        assert configured.json()["configured_fields"] == ["PIXABAY_API_KEY"]
+        runtime_text = "\n".join(
+            path.read_text(errors="ignore")
+            for path in client.app.state.store.root.rglob("*")
+            if path.is_file()
+        )
+        assert "runtime-only-secret" not in runtime_text
+    finally:
+        import os
+
+        from tools.tool_registry import registry
+
+        os.environ.pop("PIXABAY_API_KEY", None)
+        registry.clear()
+
+    rejected = client.put("/v1/runtime/config", json={"values": {"NOT_A_PROVIDER_FIELD": "secret"}})
+    assert rejected.status_code == 422
+    assert rejected.json()["error_code"] == "RUNTIME_CONFIG_FIELD_UNSUPPORTED"
+
+
+def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(client: TestClient) -> None:
+    response = client.get("/v1/pipelines/animation/bundle")
+    assert response.status_code == 200
+    bundle = response.json()
+    assert bundle["manifest"]["name"] == "animation"
+    assert bundle["stages"]
+    assert any(stage["instruction"] for stage in bundle["stages"])
+    assert client.get("/v1/pipelines/../../secrets/bundle").status_code == 404
 
 
 def test_tenant_isolation_and_invalid_approval_transition(client: TestClient) -> None:

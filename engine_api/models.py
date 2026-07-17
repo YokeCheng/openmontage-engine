@@ -86,3 +86,14 @@ class CancelRequest(BaseModel):
 class ResolveActionRequest(BaseModel):
     resolution: str
     resolved_by: str
+
+
+class RuntimeConfigRequest(BaseModel):
+    """Ephemeral provider configuration supplied by the platform control plane.
+
+    Values are applied to the running engine process only.  The engine never
+    writes them to its job store, events, manifests, or artifacts.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    values: dict[str, str | None] = Field(default_factory=dict, max_length=128)

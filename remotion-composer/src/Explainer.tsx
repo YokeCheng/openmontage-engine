@@ -316,6 +316,12 @@ export interface ExplainerProps {
   overlays?: Overlay[];
   captions?: WordCaption[];
   audio?: AudioConfig;
+  render?: {
+    width?: number;
+    height?: number;
+    fps?: number;
+    duration_seconds?: number;
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,38 @@ export const THEMES: Record<string, ThemeConfig> = {
     captionHighlightColor: "#E94560",
     captionBackgroundColor: "rgba(250, 250, 250, 0.9)",
   },
+  "premium-minimalist": {
+    primaryColor: "#1E1B18",
+    accentColor: "#B78B4B",
+    backgroundColor: "#F4F0E8",
+    surfaceColor: "#FCFAF6",
+    textColor: "#1E1B18",
+    mutedTextColor: "#716A61",
+    headingFont: "Space Grotesk",
+    bodyFont: "Inter",
+    monoFont: "IBM Plex Mono",
+    chartColors: ["#B78B4B", "#1E1B18", "#74634F", "#D5C4A8", "#5B7468"],
+    springConfig: { damping: 24, stiffness: 110, mass: 1 },
+    transitionDuration: 0.55,
+    captionHighlightColor: "#B78B4B",
+    captionBackgroundColor: "rgba(30, 27, 24, 0.82)",
+  },
+  "ink-sketch": {
+    primaryColor: "#20201E",
+    accentColor: "#C75046",
+    backgroundColor: "#F3F0E7",
+    surfaceColor: "#E8E2D4",
+    textColor: "#20201E",
+    mutedTextColor: "#69655D",
+    headingFont: "Space Grotesk",
+    bodyFont: "Inter",
+    monoFont: "Fira Code",
+    chartColors: ["#20201E", "#C75046", "#6D7E72", "#B39A72", "#596A81"],
+    springConfig: { damping: 16, stiffness: 95, mass: 1 },
+    transitionDuration: 0.45,
+    captionHighlightColor: "#C75046",
+    captionBackgroundColor: "rgba(243, 240, 231, 0.88)",
+  },
   "anime-ghibli": {
     primaryColor: "#2D5016",
     accentColor: "#FFB347",
@@ -128,12 +160,23 @@ const calculateMetadata: CalculateMetadataFunction<ExplainerProps> = async ({
   props,
 }) => {
   const cuts = props.cuts || [];
+  const render = props.render || {};
+  const fps = render.fps || 30;
   if (cuts.length === 0) {
-    return { durationInFrames: 30 * 60 };
+    return {
+      durationInFrames: Math.ceil((render.duration_seconds || 60) * fps),
+      fps,
+      width: render.width || 1920,
+      height: render.height || 1080,
+    };
   }
   const lastEnd = Math.max(...cuts.map((c) => c.out_seconds || 0));
-  // Add 1 second padding for final fade
-  return { durationInFrames: Math.ceil((lastEnd + 1) * 30) };
+  return {
+    durationInFrames: Math.ceil((render.duration_seconds || lastEnd) * fps),
+    fps,
+    width: render.width || 1920,
+    height: render.height || 1080,
+  };
 };
 
 export const Root: React.FC = () => {

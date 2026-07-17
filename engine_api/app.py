@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,12 +18,16 @@ import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from .models import ApproveRequest, CancelRequest, CreateJobRequest, ResolveActionRequest
+from .models import ApproveRequest, CancelRequest, CreateJobRequest, ResolveActionRequest, RuntimeConfigRequest
 from .scheduler import ExecutionScheduler
 from .store import EngineStore, TERMINAL, new_id, utc_now
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_RUNTIME_CONFIG_LOCK = threading.RLock()
+_SECRET_FIELD_PATTERN = re.compile(
+    r"\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|KEY|TOKEN|SECRET|CREDENTIALS|URL)|VIDEO_GEN_LOCAL_ENABLED|MUSIC_LIBRARY_DIR)\b"
+)
 
 
 def _pipeline_catalog() -> list[dict[str, Any]]:
@@ -63,6 +68,108 @@ def _provider_capabilities() -> dict[str, Any]:
             "runtime_warnings": [f"Tool registry unavailable: {type(exc).__name__}"],
             "setup_offers": [],
         }
+
+
+def _provider_catalog() -> dict[str, Any]:
+    """Return the registry-backed provider configuration catalog.
+
+    OpenMontage tools remain the source of truth.  Credential field names are
+    derived from each tool contract instead of being duplicated in the API.
+    """
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    menu = registry.provider_menu()
+    providers: dict[str, dict[str, Any]] = {}
+    for capability, group in menu.items():
+        for availability in ("available", "unavailable"):
+            for tool in group.get(availability, []):
+                provider = str(tool.get("provider") or "unknown")
+                if provider in {"selector", "multi"}:
+                    continue
+                entry = providers.setdefault(
+                    provider,
+                    {
+                        "provider": provider,
+                        "capabilities": set(),
+                        "tools": [],
+                        "credential_fields": set(),
+                        "configured": False,
+                    },
+                )
+                entry["capabilities"].add(capability)
+                entry["tools"].append(
+                    {
+                        "name": tool.get("name"),
+                        "capability": capability,
+                        "runtime": tool.get("runtime"),
+                        "status": tool.get("status"),
+                        "best_for": tool.get("best_for", []),
+                        "install_instructions": tool.get("install_instructions", ""),
+                    }
+                )
+                entry["configured"] = entry["configured"] or availability == "available"
+                dependencies = tool.get("dependencies") or []
+                for dependency in dependencies:
+                    if isinstance(dependency, str) and dependency.startswith("env:"):
+                        entry["credential_fields"].add(dependency.removeprefix("env:"))
+                setup_offer = tool.get("setup_offer") or {}
+                if isinstance(setup_offer.get("env_var"), str):
+                    entry["credential_fields"].add(setup_offer["env_var"])
+                instructions = str(tool.get("install_instructions") or "")
+                entry["credential_fields"].update(_SECRET_FIELD_PATTERN.findall(instructions))
+
+    result: list[dict[str, Any]] = []
+    for provider in sorted(providers):
+        entry = providers[provider]
+        result.append(
+            {
+                **entry,
+                "capabilities": sorted(entry["capabilities"]),
+                "credential_fields": sorted(entry["credential_fields"]),
+            }
+        )
+    return {"providers": result}
+
+
+def _allowed_runtime_fields() -> set[str]:
+    return {
+        field
+        for provider in _provider_catalog()["providers"]
+        for field in provider.get("credential_fields", [])
+    }
+
+
+def _pipeline_bundle(pipeline_name: str) -> dict[str, Any]:
+    """Load a pipeline manifest and the stage instructions its Agent follows."""
+
+    from lib.pipeline_loader import load_pipeline
+
+    manifest = load_pipeline(pipeline_name)
+    stages: list[dict[str, Any]] = []
+    for stage in manifest.get("stages", []):
+        skill_ref = stage.get("skill")
+        instruction = ""
+        if skill_ref:
+            skill_path = (REPO_ROOT / "skills" / f"{skill_ref}.md").resolve()
+            skills_root = (REPO_ROOT / "skills").resolve()
+            if skills_root not in skill_path.parents or not skill_path.is_file():
+                raise FileNotFoundError(f"Pipeline skill is unavailable: {skill_ref}")
+            instruction = skill_path.read_text(encoding="utf-8")
+        stages.append(
+            {
+                "name": stage.get("name"),
+                "skill": skill_ref,
+                "instruction": instruction,
+                "produces": stage.get("produces", []),
+                "tools_available": stage.get("tools_available", []),
+                "human_approval_default": bool(stage.get("human_approval_default", False)),
+                "review_focus": stage.get("review_focus", []),
+                "success_criteria": stage.get("success_criteria", []),
+            }
+        )
+    return {"manifest": manifest, "stages": stages}
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +259,43 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             "requires_model_credentials": False,
         }
 
+    @app.get("/v1/providers")
+    async def providers(_: None = Depends(authorize_service)) -> dict[str, Any]:
+        return await asyncio.to_thread(_provider_catalog)
+
+    @app.put("/v1/runtime/config")
+    async def configure_runtime(
+        body: RuntimeConfigRequest,
+        request: Request,
+        _: None = Depends(authorize_service),
+    ) -> JSONResponse:
+        allowed = await asyncio.to_thread(_allowed_runtime_fields)
+        unknown = sorted(set(body.values) - allowed)
+        if unknown:
+            return problem(
+                422,
+                "Unsupported provider setting",
+                f"Unknown runtime configuration fields: {', '.join(unknown)}",
+                "RUNTIME_CONFIG_FIELD_UNSUPPORTED",
+                request,
+            )
+        with _RUNTIME_CONFIG_LOCK:
+            for key, value in body.values.items():
+                if value:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
+            from tools.tool_registry import registry
+
+            registry.clear()
+            registry.discover()
+        return JSONResponse(
+            content={
+                "configured_fields": sorted(key for key, value in body.values.items() if value),
+                "capabilities": _provider_capabilities(),
+            }
+        )
+
     @app.get("/v1/pipelines")
     async def pipelines(_: None = Depends(authorize_service)) -> dict[str, Any]:
         return {
@@ -163,6 +307,20 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 "description": "Executes an approved CouncilForge manifest using the selected OpenMontage capability path.",
             },
         }
+
+    @app.get("/v1/pipelines/{pipeline_name}/bundle")
+    async def pipeline_bundle(
+        pipeline_name: str,
+        request: Request,
+        _: None = Depends(authorize_service),
+    ) -> JSONResponse:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,119}", pipeline_name):
+            return problem(404, "Pipeline not found", "The requested pipeline does not exist.", "PIPELINE_NOT_FOUND", request)
+        try:
+            bundle = await asyncio.to_thread(_pipeline_bundle, pipeline_name)
+        except (FileNotFoundError, ValueError):
+            return problem(404, "Pipeline not found", "The requested pipeline does not exist.", "PIPELINE_NOT_FOUND", request)
+        return JSONResponse(content=bundle)
 
     @app.get("/v1/jobs")
     async def list_jobs(tenant_id: str = Depends(authorize)) -> dict[str, Any]:
@@ -277,11 +435,43 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return JSONResponse(content=_public_job(job))
         if action.get("status") != "pending":
             return problem(409, "Action cannot be resolved", "The action is not pending.", "ACTION_INVALID_STATE", request)
+        allowed_resolutions = {
+            str(option.get("value"))
+            for option in action.get("options", [])
+            if isinstance(option, dict) and option.get("value")
+        }
+        if allowed_resolutions and body.resolution not in allowed_resolutions:
+            return problem(
+                422,
+                "Unsupported action resolution",
+                "Choose one of the resolutions offered by the pending action.",
+                "ACTION_RESOLUTION_UNSUPPORTED",
+                request,
+            )
         action.update({"status": "resolved", "resolution": body.resolution, "resolved_by": body.resolved_by, "resolved_at": utc_now()})
-        if job["status"] == "waiting_action":
+        if body.resolution == "cancel":
+            job["status"] = "cancelled"
+            job["stage"] = "cancelled"
+            job["progress"] = {**job["progress"], "message": "Job cancelled", "updated_at": utc_now()}
+        elif job["status"] == "waiting_action":
+            if body.resolution == "use_motion_graphics":
+                context = action.get("context") or {}
+                capability = context.get("capability")
+                policy = job.get("input", {}).setdefault("media_policy", {})
+                if capability in {"ai_image", "ai_video", "stock"}:
+                    policy["visual_source"] = "motion_graphics"
+                elif capability == "tts":
+                    policy["voice_provider"] = "none"
+                elif capability == "music_generation":
+                    policy["music_provider"] = "none"
+                policy["fallback"] = "motion_graphics"
             job["status"] = "running"
+            job["stage"] = "production"
+            job["progress"] = {"percent": 48, "message": "Resuming approved production", "updated_at": utc_now()}
         store.save_job(job)
         store.append_event(job, "action.resolved", {"action_id": action_id, "resolution": body.resolution})
+        if job["status"] == "running":
+            scheduler.submit(job_id)
         return JSONResponse(content=_public_job(job))
 
     @app.get("/v1/jobs/{job_id}/events")
