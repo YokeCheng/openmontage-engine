@@ -336,6 +336,7 @@ class CapabilityGateway:
             "workspace_id": workspace_id,
             "pipeline": manifest,
             "stage": stage,
+            "workspace_metadata": workspace.get("metadata") or {},
             "instruction": instruction,
             "tools": tools,
             "artifact_schemas": artifact_schemas,

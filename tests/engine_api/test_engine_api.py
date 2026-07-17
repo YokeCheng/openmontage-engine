@@ -467,7 +467,16 @@ def create_workspace(
             "request_id": "video-task-1",
             "title": title,
             "pipeline": "animated-explainer",
-            "metadata": {"platform_task_id": "video-task-1"},
+            "metadata": {
+                "platform_task_id": "video-task-1",
+                "source_materials": [
+                    {
+                        "kind": "source_video",
+                        "platform_asset_id": "asset_1",
+                        "platform_path": "/tmp/demo.mp4",
+                    }
+                ],
+            },
         },
     )
     assert response.status_code == 201
@@ -483,7 +492,16 @@ def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_sk
             "request_id": "video-task-1",
             "title": "Agent-hosted explainer",
             "pipeline": "animated-explainer",
-            "metadata": {"platform_task_id": "video-task-1"},
+            "metadata": {
+                "platform_task_id": "video-task-1",
+                "source_materials": [
+                    {
+                        "kind": "source_video",
+                        "platform_asset_id": "asset_1",
+                        "platform_path": "/tmp/demo.mp4",
+                    }
+                ],
+            },
         },
     )
     assert replay.status_code == 200
@@ -512,6 +530,7 @@ def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_sk
     assert context.status_code == 200
     payload = context.json()
     assert payload["stage"]["name"] == "assets"
+    assert payload["workspace_metadata"]["source_materials"][0]["platform_asset_id"] == "asset_1"
     assert "asset" in payload["instruction"].lower()
     assert {tool["name"] for tool in payload["tools"]} >= {"diagram_gen", "image_selector", "tts_selector"}
     assert payload["artifact_schemas"]["asset_manifest"]["title"]
