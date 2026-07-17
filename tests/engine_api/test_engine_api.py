@@ -332,6 +332,15 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
     assert screen_demo["required_source_materials"] == [
         "screen_recording_or_terminal_script"
     ]
+    screen_bundle = client.get("/v1/pipelines/screen-demo/bundle")
+    assert screen_bundle.status_code == 200
+    screen_script = next(
+        stage
+        for stage in screen_bundle.json()["manifest"]["stages"]
+        if stage["name"] == "script"
+    )
+    assert "transcriber" not in screen_script.get("required_tools", [])
+    assert "transcriber" in screen_script.get("optional_tools", [])
 
     source_driven = {
         name: pipelines[name]["platform_contract"]["required_source_materials"]

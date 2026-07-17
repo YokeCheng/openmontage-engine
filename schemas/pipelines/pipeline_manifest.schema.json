@@ -131,6 +131,24 @@
         "analysis_tools": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "production_modes": {
+      "type": "array",
+      "description": "Alternative execution modes the pipeline can choose from based on the supplied brief and source materials.",
+      "items": {
+        "type": "object",
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "scene_type": { "type": "string" },
+          "required_tools": { "type": "array", "items": { "type": "string" } },
+          "optional_tools": { "type": "array", "items": { "type": "string" } },
+          "agent_skills": { "type": "array", "items": { "type": "string" } },
+          "best_for": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
     "platform_contract": {
       "type": "object",
       "description": "Public contract used by host platforms to decide whether the pipeline can be created from their current intake UI.",

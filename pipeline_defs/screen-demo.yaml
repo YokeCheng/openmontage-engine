@@ -143,9 +143,8 @@ stages:
       - source_media_review
     produces:
       - script
-    required_tools:
-      - transcriber
     optional_tools:
+      - transcriber
       - scene_detect
       - audio_enhance
     tools_available:
@@ -159,7 +158,7 @@ stages:
       - Sections align with logical workflow steps
     success_criteria:
       - Schema-valid script artifact
-      - Script sections have timestamps from transcript or manual annotation
+      - Script sections have timestamps from transcript, terminal script, or manual annotation
 
   - name: scene_plan
     skill: pipelines/screen-demo/scene-director
