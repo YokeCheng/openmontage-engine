@@ -41,6 +41,39 @@ _SECRET_FIELD_PATTERN = re.compile(
 )
 
 
+def _pipeline_platform_contract(data: dict[str, Any]) -> dict[str, Any]:
+    contract = data.get("platform_contract")
+    if not isinstance(contract, dict):
+        return {
+            "version": "1.0",
+            "readiness": "requires_input_adapter",
+            "intake_adapter": "unavailable",
+            "status_reason": "This pipeline has not declared a host-platform intake contract.",
+            "input_modes": [],
+            "supported_formats": [],
+            "required_brief_fields": [],
+            "optional_brief_fields": [],
+            "required_source_materials": [],
+            "capability_requirements": [],
+            "approval_policy": {"human_approval_stages": []},
+            "artifact_schema_contract": "",
+        }
+    return {
+        "version": str(contract.get("version") or "1.0"),
+        "readiness": str(contract.get("readiness") or "requires_input_adapter"),
+        "intake_adapter": str(contract.get("intake_adapter") or "unavailable"),
+        "status_reason": str(contract.get("status_reason") or ""),
+        "input_modes": list(contract.get("input_modes") or []),
+        "supported_formats": list(contract.get("supported_formats") or []),
+        "required_brief_fields": list(contract.get("required_brief_fields") or []),
+        "optional_brief_fields": list(contract.get("optional_brief_fields") or []),
+        "required_source_materials": list(contract.get("required_source_materials") or []),
+        "capability_requirements": list(contract.get("capability_requirements") or []),
+        "approval_policy": dict(contract.get("approval_policy") or {"human_approval_stages": []}),
+        "artifact_schema_contract": str(contract.get("artifact_schema_contract") or ""),
+    }
+
+
 def _pipeline_catalog() -> list[dict[str, Any]]:
     catalog: list[dict[str, Any]] = []
     for path in sorted((REPO_ROOT / "pipeline_defs").glob("*.yaml")):
@@ -58,6 +91,7 @@ def _pipeline_catalog() -> list[dict[str, Any]]:
                 "stages": [stage.get("name") if isinstance(stage, dict) else stage for stage in stages],
                 "execution_contract": "normalized-video-manifest",
                 "agent_execution_contract": "capability-gateway-v1",
+                "platform_contract": _pipeline_platform_contract(data),
             }
         )
     return catalog

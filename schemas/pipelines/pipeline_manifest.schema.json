@@ -131,6 +131,51 @@
         "analysis_tools": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "platform_contract": {
+      "type": "object",
+      "description": "Public contract used by host platforms to decide whether the pipeline can be created from their current intake UI.",
+      "required": ["version", "readiness", "intake_adapter"],
+      "properties": {
+        "version": { "type": "string" },
+        "readiness": {
+          "type": "string",
+          "enum": ["ready", "requires_input_adapter", "disabled"]
+        },
+        "intake_adapter": { "type": "string" },
+        "status_reason": { "type": "string" },
+        "input_modes": { "type": "array", "items": { "type": "string" } },
+        "supported_formats": { "type": "array", "items": { "type": "string" } },
+        "required_brief_fields": { "type": "array", "items": { "type": "string" } },
+        "optional_brief_fields": { "type": "array", "items": { "type": "string" } },
+        "required_source_materials": { "type": "array", "items": { "type": "string" } },
+        "capability_requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["capability", "required"],
+            "properties": {
+              "capability": { "type": "string" },
+              "required": { "type": "boolean" },
+              "fallback": { "type": "string" },
+              "stage": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "approval_policy": {
+          "type": "object",
+          "properties": {
+            "human_approval_stages": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "artifact_schema_contract": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
     "metadata": { "type": "object" },
     "orchestration": {
       "type": "object",

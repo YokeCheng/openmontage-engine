@@ -299,6 +299,25 @@ def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephe
     assert rejected.json()["error_code"] == "RUNTIME_CONFIG_FIELD_UNSUPPORTED"
 
 
+def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient) -> None:
+    response = client.get("/v1/pipelines")
+    assert response.status_code == 200
+    pipelines = {item["name"]: item for item in response.json()["pipelines"]}
+
+    explainer = pipelines["animated-explainer"]["platform_contract"]
+    assert explainer["readiness"] == "ready"
+    assert explainer["intake_adapter"] == "councilforge-video-brief-v1"
+    assert "knowledge_explainer" in explainer["supported_formats"]
+    assert explainer["required_source_materials"] == []
+    assert {
+        item["capability"] for item in explainer["capability_requirements"]
+    } >= {"video_post", "tts", "image_generation", "video_generation"}
+
+    talking_head = pipelines["talking-head"]["platform_contract"]
+    assert talking_head["readiness"] == "requires_input_adapter"
+    assert talking_head["intake_adapter"] == "unavailable"
+
+
 def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(client: TestClient) -> None:
     response = client.get("/v1/pipelines/animation/bundle")
     assert response.status_code == 200

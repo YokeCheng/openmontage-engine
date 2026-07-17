@@ -20,6 +20,70 @@ reference_input:
     - scene_detect
     - frame_sampler
 
+platform_contract:
+  version: "1.0"
+  readiness: ready
+  intake_adapter: councilforge-video-brief-v1
+  status_reason: "Can be created from a structured topic brief without uploaded source media."
+  input_modes:
+    - generated_from_brief
+    - reference_video_optional
+  supported_formats:
+    - product_intro
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - format
+    - language
+    - audience
+    - channel
+    - duration_seconds
+    - aspect_ratio
+    - visual_style
+    - maximum_usd
+  optional_brief_fields:
+    - call_to_action
+    - visual_source
+    - image_provider
+    - video_provider
+    - voice
+    - voice_speed
+    - music
+    - subtitles
+    - fps
+    - source_materials
+  required_source_materials: []
+  capability_requirements:
+    - capability: video_post
+      required: true
+      fallback: remotion_motion_graphics
+      stage: compose
+    - capability: tts
+      required: false
+      fallback: none
+      stage: assets
+    - capability: image_generation
+      required: false
+      fallback: motion_graphics
+      stage: assets
+    - capability: video_generation
+      required: false
+      fallback: motion_graphics
+      stage: assets
+    - capability: music_generation
+      required: false
+      fallback: none
+      stage: assets
+  approval_policy:
+    human_approval_stages:
+      - proposal
+      - script
+      - scene_plan
+      - assets
+      - publish
+  artifact_schema_contract: councilforge-video-agent-v1
+
 extensions:
   custom_scripts: true
   custom_playbooks: true
