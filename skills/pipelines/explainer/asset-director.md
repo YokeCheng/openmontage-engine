@@ -16,11 +16,14 @@ the approved `image_provider` as `preferred_provider` unless it is `auto`. If
 voice is anything other than `none`, `off`, or `disabled`, call `tts_selector`
 and pass the approved voice/provider preference as `preferred_provider` when it
 names a provider such as `dashscope`. If music is anything other than `none`,
-`off`, or `disabled`, call the requested music tool; for `pixabay_music`, use
-`pixabay_music` directly. A provider failure is not a reason to silently switch
-to the no-provider Remotion shortcut: either produce the requested asset through
-an approved fallback and record it, or record a `metadata.media_fallbacks[]`
-entry with `kind`, `requested`, `fallback`, `reason`, and `user_impact`.
+`off`, or `disabled`, call the requested music tool. For `pixabay_music`, use
+`pixabay_music` directly; for `music_library` or `local`, call `music_library`,
+select a listed track, and add it to `asset_manifest.assets[]` with
+`type: "audio"`, `subtype: "music"`, `source_tool: "music_library"`, and the
+track's `path`. A provider failure is not a reason to silently switch to the
+no-provider Remotion shortcut: either produce the requested asset through an
+approved fallback and record it, or record a `metadata.media_fallbacks[]` entry
+with `kind`, `requested`, `fallback`, `reason`, and `user_impact`.
 
 Before calling the tool, join every `scene_plan.scenes[]` item to the approved
 `script.sections[]` item named by `script_section_id`. Pass the script text as
@@ -61,7 +64,7 @@ Quick routing for common explainer needs:
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | What to produce |
 | Playbook | Active style playbook | Image prompts, diagram style, audio preferences |
-| Tools | `tts_selector`, `image_selector`, `video_selector`, `diagram_gen`, `code_snippet`, `music_gen` — selectors auto-discover all available providers from the registry | Generation capabilities |
+| Tools | `tts_selector`, `image_selector`, `video_selector`, `diagram_gen`, `code_snippet`, `music_gen`, `music_library`, `pixabay_music` — selectors auto-discover all available providers from the registry | Generation capabilities |
 | Cost tracker | `tools/cost_tracker.py` | Budget governance |
 
 ## Process
@@ -164,7 +167,7 @@ Process asset tasks grouped by tool for efficiency:
 1. Read playbook's `audio.music_mood` and `audio.music_volume`
 2. Check the music decision from `proposal_packet.production_plan.music_source` (set by the Proposal Director)
 3. Source the background track in this priority order:
-   - **User-selected library track**: If the proposal specified a track from `music_library/`, copy it to `projects/<project>/assets/music/background_music.mp3`
+   - **User-selected library track**: If the proposal specified a track from `music_library/`, use `music_library` to list tracks and reference the selected path in `asset_manifest.assets[]`.
    - **User music library (`music_library/`)**: If the folder exists and has tracks, pick the best match for the playbook's `audio.music_mood`. List candidates by filename and let the EP decide.
    - **Music generation API**: Use `music_gen` (ElevenLabs) or `suno_music` if available. Check status via registry first — if the tool is unavailable or quota-exhausted, skip immediately (do NOT attempt and fail silently).
    - **No music available**: Log this clearly in the asset manifest as `"music_status": "unavailable"` with the reason. Do NOT silently produce a video without music — the EP and user should know.

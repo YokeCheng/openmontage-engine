@@ -665,6 +665,150 @@ def test_capability_gateway_injects_workspace_local_remotion_paths(
     assert execution["artifacts"][0]["path"].startswith("tool-output/assets/remotion-motion/")
 
 
+def test_capability_gateway_injects_workspace_local_video_compose_output_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-video-compose-default")
+    workspace_id = workspace["workspace_id"]
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    video_compose = registry.get("video_compose")
+    assert video_compose is not None
+
+    seen_inputs: dict[str, object] = {}
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        seen_inputs.update(inputs)
+        output = Path(str(inputs["output_path"]))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"workspace-local-video")
+        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(video_compose, "execute", fake_execute)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="video-compose-default"),
+        json={
+            "stage": "compose",
+            "tool_name": "video_compose",
+            "inputs": {
+                "edit_decisions": {
+                    "cuts": [
+                        {
+                            "id": "scene-1",
+                            "type": "text_card",
+                            "text": "CouncilForge",
+                            "in_seconds": 0,
+                            "out_seconds": 1,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    output_path = Path(str(seen_inputs["output_path"]))
+    assert output_path.name == "final.mp4"
+    assert output_path.parent.name == "renders"
+    assert workspace_id in output_path.parts
+    assert execution["artifacts"]
+    assert execution["artifacts"][0]["path"] == "renders/final.mp4"
+
+
+def test_capability_gateway_materializes_local_music_library_inputs_for_video_compose(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-video-compose-local-music")
+    workspace_id = workspace["workspace_id"]
+
+    repo_root = tmp_path / "repo"
+    music_dir = repo_root / "music_library"
+    music_dir.mkdir(parents=True)
+    music_file = music_dir / "ambient.mp3"
+    music_file.write_bytes(b"fake-local-music")
+    client.app.state.capability_gateway.repo_root = repo_root
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    video_compose = registry.get("video_compose")
+    assert video_compose is not None
+
+    seen_inputs: dict[str, object] = {}
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        seen_inputs.update(inputs)
+        output = Path(str(inputs["output_path"]))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"workspace-local-video")
+        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(video_compose, "execute", fake_execute)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="video-compose-local-music"),
+        json={
+            "stage": "compose",
+            "tool_name": "video_compose",
+            "inputs": {
+                "operation": "render",
+                "edit_decisions": {
+                    "cuts": [
+                        {
+                            "id": "scene-1",
+                            "source": "scene-1",
+                            "in_seconds": 0,
+                            "out_seconds": 1,
+                        }
+                    ],
+                    "audio": {"music": {"asset_id": "music-bg"}},
+                },
+                "asset_manifest": {
+                    "assets": [
+                        {
+                            "id": "music-bg",
+                            "type": "audio",
+                            "subtype": "music",
+                            "path": str(music_file),
+                        }
+                    ],
+                    "metadata": {"library_dir": str(music_dir)},
+                },
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    asset_path = Path(str(seen_inputs["asset_manifest"]["assets"][0]["path"]))  # type: ignore[index]
+    library_dir = Path(str(seen_inputs["asset_manifest"]["metadata"]["library_dir"]))  # type: ignore[index]
+    assert workspace_id in asset_path.parts
+    assert workspace_id in library_dir.parts
+    assert asset_path.read_bytes() == b"fake-local-music"
+
+
 def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: TestClient) -> None:
     workspace = create_workspace(client, key="workspace-cancel")
     workspace_id = workspace["workspace_id"]

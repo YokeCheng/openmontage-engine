@@ -1,16 +1,14 @@
 # Compose Director — Explainer Pipeline
 
-## Runtime-native motion graphics
+## Single final renderer
 
-If `asset_manifest.metadata.composition` is `CouncilForgePlatform`, call
-`remotion_motion_graphics` with `operation="render"` and the approved scenes
-and render specification, and pass the complete `asset_manifest` unchanged.
-Persist the tool's returned `render_report` and `final_review` directly after
-checking their schemas. This is the native CouncilForge Remotion path; it can
-embed generated scene images, narration audio, and background music from the
-asset manifest. Do not route those scene JSON assets through `video_compose` as
-if they were source footage, and do not omit the asset manifest just because
-the component can fall back to motion graphics.
+Use `video_compose` as the only final renderer in this stage. The
+`remotion_motion_graphics` tool may prepare CouncilForgePlatform scene JSON
+during the assets stage, but the compose stage must not call it again. Pass the
+complete `asset_manifest` to `video_compose`; it knows to embed narration and
+music while ignoring non-media animation descriptor JSON as direct cut sources.
+This keeps one authoritative render report and avoids a successful
+`video_compose` output being overwritten by a second renderer failure.
 
 Build render scenes by joining `scene_plan.scenes[]` to
 `script.sections[]` through `script_section_id`. Each scene must carry the
@@ -36,7 +34,7 @@ Read `edit_decisions.render_runtime` before anything else. It was locked at prop
 
 `final_review.checks.promise_preservation.render_runtime_used` must equal the runtime that actually ran; `runtime_swap_detected` must be `false` unless an approved decision authorizes the swap.
 
-**Pass `proposal_packet` to `video_compose.execute()`** so in-tool swap detection can actually fire. Without it the `runtime_swap_check` is reported as `skipped` and you have to rely on the reviewer skill's cross-artifact comparison instead.
+**Pass `proposal_packet` to `video_compose.execute()`** so in-tool swap detection can actually fire. Without it the `runtime_swap_check` is reported as `skipped` and you have to rely on the reviewer skill's cross-artifact comparison instead. Do not call `remotion_motion_graphics` in compose; if `video_compose` succeeds, persist its result and stop.
 
 ## Prerequisites
 
@@ -193,10 +191,9 @@ Call the `video_compose` tool with:
 }
 ```
 
-If using Remotion for animated segments:
-1. Generate Remotion composition data from edit decisions
-2. Call `video_compose` with `operation: "remotion_render"` for animated segments
-3. Assemble Remotion outputs with remaining segments via FFmpeg
+If using Remotion for animated segments, still call `video_compose` once with
+`operation: "render"`. Do not manually call lower-level Remotion tools from
+this stage.
 
 **Zero-key Remotion render (component-only videos):**
 When all scenes are Remotion component types (hero_title, stat_card, bar_chart, line_chart,

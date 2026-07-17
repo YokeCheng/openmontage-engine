@@ -414,9 +414,14 @@ class CapabilityGateway:
         downloads continue to work.
         """
 
-        if tool_name != "remotion_motion_graphics":
-            return inputs
         result = dict(inputs)
+        if tool_name == "video_compose":
+            result = self._materialize_allowed_external_inputs(workspace_dir, stage_name, result)
+            if not result.get("output_path"):
+                result["output_path"] = str(workspace_dir / "renders" / "final.mp4")
+            return result
+        if tool_name != "remotion_motion_graphics":
+            return result
         operation = str(result.get("operation") or "")
         if operation == "prepare" and not result.get("output_dir"):
             result["output_dir"] = str(workspace_dir / "tool-output" / stage_name / "remotion-motion")
@@ -426,6 +431,70 @@ class CapabilityGateway:
             if not result.get("output_dir"):
                 result["output_dir"] = str(workspace_dir / "tool-output" / stage_name / "remotion-motion")
         return result
+
+    def _materialize_allowed_external_inputs(
+        self,
+        workspace_dir: Path,
+        stage_name: str,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Copy trusted engine-owned external files into the tenant workspace.
+
+        The service boundary intentionally rejects arbitrary paths outside the
+        workspace. A small set of engine-owned resources, such as the local
+        music library, are still legitimate inputs selected by previous
+        OpenMontage stages. Before path normalization runs, copy those files
+        into the current workspace and rewrite the payload to use the
+        workspace-local copy. Everything else remains subject to the normal
+        path-escape rejection.
+        """
+
+        allowed_roots = [self.repo_root / "music_library"]
+        import_root = workspace_dir / "tool-inputs" / stage_name / "external"
+
+        def inside(candidate: Path, root: Path) -> bool:
+            try:
+                candidate.resolve().relative_to(root.resolve())
+                return True
+            except ValueError:
+                return False
+
+        def materialize_file(path: Path) -> str | None:
+            resolved = path.resolve()
+            if not resolved.is_file() or not any(inside(resolved, root) for root in allowed_roots):
+                return None
+            digest = _file_sha256(resolved)[:16]
+            target = import_root / f"{resolved.stem}-{digest}{resolved.suffix}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists() or _file_sha256(target) != _file_sha256(resolved):
+                shutil.copy2(resolved, target)
+            return str(target)
+
+        def materialize_dir(path: Path) -> str | None:
+            resolved = path.resolve()
+            if not resolved.is_dir():
+                return None
+            if not any(resolved == root.resolve() or inside(resolved, root) for root in allowed_roots):
+                return None
+            import_root.mkdir(parents=True, exist_ok=True)
+            return str(import_root)
+
+        def walk(key: str, value: Any) -> Any:
+            if isinstance(value, dict):
+                return {str(nested_key): walk(str(nested_key), nested_value) for nested_key, nested_value in value.items()}
+            if isinstance(value, list):
+                return [walk(key, item) for item in value]
+            if isinstance(value, str) and (key == "path" or _looks_like_path(key)):
+                candidate = Path(value)
+                if candidate.is_absolute():
+                    if replacement := materialize_file(candidate):
+                        return replacement
+                    if replacement := materialize_dir(candidate):
+                        return replacement
+            return value
+
+        materialized = walk("", inputs)
+        return materialized if isinstance(materialized, dict) else dict(inputs)
 
     def create_execution(
         self,

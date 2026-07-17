@@ -34,6 +34,8 @@ import json
 import logging
 import subprocess
 import time
+import hashlib
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -355,11 +357,120 @@ class VideoCompose(BaseTool):
         return result
 
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
+    _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
     @staticmethod
     def _is_image(path: Path) -> bool:
         """Check if a file is a still image (routes to Remotion, not FFmpeg)."""
         return path.suffix.lower() in VideoCompose._IMAGE_EXTENSIONS
+
+    @classmethod
+    def _is_renderable_cut_asset(cls, asset: dict[str, Any]) -> bool:
+        """Return True when an asset can safely be used as a cut ``source``.
+
+        Agent-produced motion-graphics preparation files are JSON descriptors
+        (`type="animation"`).  They are valuable metadata for checkpoints, but
+        they are not bitmap/video media.  If they are forwarded as
+        ``cuts[].source``, the Remotion Explainer fallback treats the JSON path
+        as an image and fails with an image decode error.  Only concrete
+        image/video media should become a Remotion/FFmpeg cut source.
+        """
+
+        asset_type = str(asset.get("type") or "").lower()
+        media_type = str(asset.get("media_type") or "").lower()
+        path = str(asset.get("path") or asset.get("output") or asset.get("output_path") or "").lower()
+        suffix = Path(path).suffix.lower()
+        if asset_type in {"image", "video"}:
+            return True
+        if media_type.startswith(("image/", "video/")):
+            return True
+        return suffix in cls._IMAGE_EXTENSIONS or suffix in cls._VIDEO_EXTENSIONS
+
+    @staticmethod
+    def _stage_public_asset(src: str, *, output_path: Path, namespace: str) -> str:
+        parsed = src.strip()
+        if not parsed or parsed.startswith(("http://", "https://", "data:", "file://")):
+            return src
+
+        source = Path(parsed)
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        workspace_root = output_path.parent.parent if output_path.parent.name == "renders" else output_path.parent
+        candidates = [
+            source,
+            workspace_root / source,
+            repo_root / source,
+        ]
+        resolved = next((candidate.resolve() for candidate in candidates if candidate.exists()), None)
+        if resolved is None or not resolved.is_file():
+            return src
+
+        public_prefix = f"councilforge-runtime/{namespace}"
+        public_dir = repo_root / "remotion-composer" / "public" / public_prefix
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()[:12]
+        safe_name = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in resolved.name)
+        target = public_dir / f"{digest}-{safe_name}"
+        if not target.is_file():
+            public_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resolved, target)
+        return f"{public_prefix}/{target.name}"
+
+    @classmethod
+    def _stage_remotion_audio_assets(cls, props: dict[str, Any], output_path: Path) -> None:
+        namespace = hashlib.sha256(str(output_path).encode()).hexdigest()[:16]
+        audio = props.get("audio")
+        if not isinstance(audio, dict):
+            return
+        for layer_name in ("narration", "music"):
+            layer = audio.get(layer_name)
+            if isinstance(layer, dict) and isinstance(layer.get("src"), str):
+                layer["src"] = cls._stage_public_asset(layer["src"], output_path=output_path, namespace=namespace)
+
+    @staticmethod
+    def _audio_from_asset_manifest(asset_manifest: dict[str, Any]) -> dict[str, Any]:
+        audio: dict[str, Any] = {}
+        for asset in asset_manifest.get("assets", []):
+            if not isinstance(asset, dict):
+                continue
+            asset_type = str(asset.get("type") or "").lower()
+            subtype = str(asset.get("subtype") or asset_type).lower()
+            path = str(asset.get("path") or asset.get("output") or asset.get("output_path") or asset.get("file_path") or "")
+            if not path or asset_type not in {"audio", "music", "narration", "voice", "voiceover"}:
+                continue
+            if subtype == "music" and "music" not in audio:
+                audio["music"] = {
+                    "src": path,
+                    "volume": float(asset.get("volume") or asset.get("mix_volume") or 0.85),
+                    "loop": bool(asset.get("loop", True)),
+                    "fadeInSeconds": float(asset.get("fade_in_seconds") or 0.6),
+                    "fadeOutSeconds": float(asset.get("fade_out_seconds") or 0.8),
+                }
+            elif subtype in {"narration", "voice", "voiceover"} and not asset.get("scene_id") and "narration" not in audio:
+                audio["narration"] = {"src": path, "volume": float(asset.get("volume") or 1)}
+        return audio
+
+    @classmethod
+    def _with_manifest_audio(cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]) -> dict[str, Any]:
+        merged = json.loads(json.dumps(edit_decisions))
+        manifest_audio = cls._audio_from_asset_manifest(asset_manifest)
+        if not manifest_audio:
+            return merged
+        audio = merged.get("audio")
+        if not isinstance(audio, dict):
+            audio = {}
+        for key, value in manifest_audio.items():
+            existing = audio.get(key)
+            if isinstance(existing, dict) and isinstance(value, dict):
+                for field, field_value in value.items():
+                    existing.setdefault(field, field_value)
+                if key == "music" and existing.get("src"):
+                    try:
+                        existing["volume"] = max(float(existing.get("volume") or 0), float(value.get("volume") or 0.85))
+                    except (TypeError, ValueError):
+                        existing["volume"] = float(value.get("volume") or 0.85)
+            else:
+                audio[key] = value
+        merged["audio"] = audio
+        return merged
 
     @staticmethod
     def _has_audio_stream(path: Path) -> bool:
@@ -1375,7 +1486,22 @@ class VideoCompose(BaseTool):
             source_id = cut.get("source", "")
             resolved_cut = dict(cut)
             if source_id in asset_lookup:
-                resolved_cut["source"] = asset_lookup[source_id]["path"]
+                asset = asset_lookup[source_id]
+                if self._is_renderable_cut_asset(asset):
+                    resolved_cut["source"] = asset["path"]
+                else:
+                    resolved_cut["source"] = ""
+                    resolved_cut.setdefault("type", "text_card")
+                    resolved_cut.setdefault(
+                        "text",
+                        cut.get("text")
+                        or cut.get("title")
+                        or cut.get("reason")
+                        or str(source_id),
+                    )
+                    resolved_cut.setdefault("metadata", {})
+                    if isinstance(resolved_cut["metadata"], dict):
+                        resolved_cut["metadata"]["non_renderable_source_asset"] = source_id
             resolved_cuts.append(resolved_cut)
 
         # --- Pre-compose validation gate ---
@@ -1407,8 +1533,12 @@ class VideoCompose(BaseTool):
             )
         # --- Explicit Remotion path (render_runtime == 'remotion') ---
         if self._needs_remotion(resolved_cuts):
+            remotion_edit_decisions = self._with_manifest_audio(
+                dict(edit_decisions, cuts=resolved_cuts),
+                asset_manifest,
+            )
             remotion_inputs: dict[str, Any] = {
-                "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
+                "edit_decisions": remotion_edit_decisions,
                 "output_path": str(output_path),
             }
             if profile:
@@ -1722,6 +1852,8 @@ class VideoCompose(BaseTool):
             theme_config = self._build_theme_from_playbook(playbook_name, composition_data)
             if theme_config:
                 props["themeConfig"] = theme_config
+
+        self._stage_remotion_audio_assets(props, output_path)
 
         # Write props to temp file for Remotion CLI
         props_path = output_path.parent / ".remotion_props.json"

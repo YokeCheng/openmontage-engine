@@ -79,6 +79,10 @@ platform_contract:
       required: false
       fallback: none
       stage: assets
+    - capability: music_library
+      required: false
+      fallback: none
+      stage: assets
   approval_policy:
     human_approval_stages:
       - proposal
@@ -169,7 +173,7 @@ stages:
       - Schema-valid proposal_packet with at least 3 concept_options
       - selected_concept references a valid concept_id
       - cost_estimate has itemized line_items with per-tool costs
-      - approval.status is "approved" or "approved_with_changes" before proceeding
+      - approval.status is "pending" when checkpointed for platform human approval; downstream may proceed only after the platform records approval
     sub_stages:
       - name: sample
         description: "10-15 second preview clip for reference-driven productions"
@@ -245,6 +249,7 @@ stages:
       - code_snippet
       - music_gen
       - pixabay_music
+      - music_library
     tools_available:
       - remotion_motion_graphics
       - tts_selector
@@ -254,6 +259,7 @@ stages:
       - code_snippet
       - music_gen
       - pixabay_music
+      - music_library
       - math_animate
     checkpoint_required: true
     human_approval_default: true
@@ -302,10 +308,8 @@ stages:
       - video_compose
       - audio_mixer
     optional_tools:
-      - remotion_motion_graphics
       - video_stitch
     tools_available:
-      - remotion_motion_graphics
       - video_compose
       - hyperframes_compose
       - video_stitch

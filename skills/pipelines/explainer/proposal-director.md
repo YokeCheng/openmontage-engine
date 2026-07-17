@@ -14,12 +14,21 @@ Explainer proposals must lock **both** a `renderer_family` (creative grammar) an
 
 **MANDATORY workflow — present both runtimes, don't silently default:**
 
+**CouncilForge-hosted mode:** When this skill is executed by a platform Agent host rather than a conversational
+Cursor/Claude session, do not pause inside the skill waiting for a chat reply. Produce a complete
+`proposal_packet` with `approval.status: "pending"` and include the recommended, auditable
+`production_plan.render_runtime` / `production_plan.composition_mode` values for the user to approve in the
+platform UI. The platform checkpoint becomes the human approval gate and prevents downstream stages from running
+until approval is recorded.
+
 1. Query `video_compose.get_info()["render_engines"]`. If both `remotion` and `hyperframes` are `True`, proceed to step 2. If only one is available, go to step 4 with just that one.
 2. Present both runtimes to the user with brief-specific analysis. For THIS concept:
    - **Remotion** — one line on fit (mention the React scene stack components that apply), one line on tradeoff.
    - **HyperFrames** — one line on fit (mention HTML/GSAP motion, registry blocks, kinetic typography if applicable), one line on tradeoff.
 3. Recommend one with rationale tied to the brief's `delivery_promise`, `visual_approach`, and whether word-level caption burn is required (that one forces Remotion).
-4. Wait for explicit user approval. Do NOT write `render_runtime` into `proposal_packet.production_plan` before approval.
+4. In conversational mode, wait for explicit user approval before proceeding. In CouncilForge-hosted mode, write the
+   recommended `render_runtime` into `proposal_packet.production_plan`, set `approval.status: "pending"`, and let the
+   platform approval gate collect the user's decision before downstream stages run.
 5. Log a `render_runtime_selection` decision in `decision_log` with BOTH runtimes (plus `ffmpeg` if it was a realistic option) in `options_considered`, the user's pick as `selected`, and the rationale as `reason`. If a runtime was unavailable, record it as rejected with `rejected_because: "runtime not available on this machine"`.
 
 Fit cheat-sheet for recommendation (input for the conversation, not an auto-decision):
