@@ -1,9 +1,9 @@
 name: animated-explainer
 version: "2.0"
 description: >
-  Generated explainer video from topic/idea - fully AI-produced with narration, visuals, and music.
-  Features a research-first pre-production phase: the agent researches the topic, proposes concepts
-  with cost estimates, and gets explicit user approval before any assets are generated.
+  从主题、产品说明或知识点生成产品介绍/知识解说视频。流程包含研究、创意方案、
+  脚本、分镜、素材、配音、合成、质检和交付；在生成高成本素材前会先给出方案、
+  预算和风险说明，并等待用户明确批准。
 category: generated
 stability: production
 
@@ -24,7 +24,7 @@ platform_contract:
   version: "1.0"
   readiness: ready
   intake_adapter: councilforge-video-brief-v1
-  status_reason: "Can be created from a structured topic brief without uploaded source media."
+  status_reason: "可直接根据结构化主题 brief 创建，不强制要求上传源素材。"
   input_modes:
     - generated_from_brief
     - reference_video_optional
