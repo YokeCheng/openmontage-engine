@@ -10,16 +10,11 @@ import {
   useVideoConfig,
 } from "remotion";
 import { getVideoMetadata } from "@remotion/media-utils";
-import { loadFont } from "@remotion/google-fonts/PlayfairDisplay";
 
-// Editorial serif for the tagline — Playfair Display at its boldest weight.
-// Loaded once at module scope so every render reuses the same font face.
-const { fontFamily } = loadFont("normal", {
-  weights: ["400", "700", "900"],
-  subsets: ["latin"],
-});
+// Use a system serif stack so a local render never depends on fonts.gstatic.com.
+const fontFamily = 'Georgia, "Times New Roman", "Songti SC", serif';
 
-export interface TitledVideoProps {
+export interface TitledVideoProps extends Record<string, unknown> {
   videoSrc: string;
   tagline: string;
   // When the tagline starts animating in, in seconds from the start of the video.

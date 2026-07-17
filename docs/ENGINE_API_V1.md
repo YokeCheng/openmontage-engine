@@ -34,6 +34,8 @@ v1 协议必须满足：
 - 平台级模型密钥不在引擎中长期保存；
 - 对外协议不暴露本地绝对路径和内部实现细节。
 
+引擎进程启动时会检查持久化的活动执行。上一进程未能写入终态的执行会转为可重试的 `ENGINE_RESTARTED` 失败，同时追加 `execution.failed` 事件（包含 `execution_id`、`stage`和错误码）。CouncilForge 应用新 attempt 和新幂等键重试，不应覆盖原执行记录。
+
 ## 2. API 概览
 
 | Method | Path | 用途 | 成功响应 |

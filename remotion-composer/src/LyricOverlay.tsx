@@ -8,12 +8,8 @@ import {
   useVideoConfig,
 } from "remotion";
 import React from "react";
-import { loadFont as loadPlayfair } from "@remotion/google-fonts/PlayfairDisplay";
 
-const { fontFamily: playfairItalic } = loadPlayfair("italic", {
-  weights: ["400", "700"],
-  subsets: ["latin"],
-});
+const playfairItalic = 'Georgia, "Times New Roman", "Songti SC", serif';
 
 function resolveAsset(src: string): string {
   if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) return src;
@@ -38,7 +34,7 @@ export interface Lyric {
   outSeconds: number;
 }
 
-export interface LyricOverlayProps {
+export interface LyricOverlayProps extends Record<string, unknown> {
   videoSrc: string;
   lyrics: Lyric[];
   bottomY?: number; // 0..1, vertical center of subtitle band

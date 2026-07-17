@@ -2,6 +2,16 @@ from tools.base_tool import ToolStatus
 from tools.video.remotion_motion_graphics import RemotionMotionGraphics
 
 
+def test_remotion_bundle_has_no_runtime_google_font_dependency() -> None:
+    composer = RemotionMotionGraphics()._repo_root / "remotion-composer" / "src"
+    offenders = [
+        path
+        for path in composer.rglob("*.tsx")
+        if "@remotion/google-fonts" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
 def _inputs() -> dict:
     return {
         "operation": "prepare",

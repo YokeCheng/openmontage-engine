@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -590,6 +591,49 @@ def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: Tes
         headers={"X-Tenant-ID": "tenant-a"},
     )
     assert current.json()["status"] == "cancelled"
+
+
+def test_capability_gateway_recovery_records_retryable_failure_event(client: TestClient) -> None:
+    workspace = create_workspace(client, key="workspace-recovery")
+    workspace_id = workspace["workspace_id"]
+    gateway = client.app.state.capability_gateway
+    execution_id = "execution_interrupted"
+    execution_path = gateway._execution_path(workspace_id, execution_id)
+    execution_path.parent.mkdir(parents=True, exist_ok=True)
+    execution_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "execution_id": execution_id,
+                "workspace_id": workspace_id,
+                "tenant_id": "tenant-a",
+                "pipeline": {"name": "animated-explainer", "version": "2.0"},
+                "stage": "assets",
+                "tool_name": "diagram_gen",
+                "status": "running",
+                "inputs_digest": "digest",
+                "result": None,
+                "error": None,
+                "artifacts": [],
+                "created_at": utc_now(),
+                "started_at": utc_now(),
+                "finished_at": None,
+                "updated_at": utc_now(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gateway.recover()
+
+    recovered = gateway.get_execution(workspace_id, "tenant-a", execution_id)
+    assert recovered["status"] == "failed"
+    assert recovered["error"] == {
+        "code": "ENGINE_RESTARTED",
+        "message": "The tool worker restarted before this execution completed.",
+        "retryable": True,
+    }
+    assert gateway.events(workspace_id, "tenant-a")[-1]["type"] == "execution.failed"
 
 
 def test_agent_layer_three_skill_checkpoint_and_workspace_event_sequence(client: TestClient) -> None:

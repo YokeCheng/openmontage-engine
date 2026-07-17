@@ -154,6 +154,19 @@ class CapabilityGateway:
                     "retryable": True,
                 }
                 _atomic_json(path, execution)
+                workspace_id = str(execution.get("workspace_id") or "")
+                tenant_id = str(execution.get("tenant_id") or "")
+                if workspace_id and tenant_id:
+                    self._append_event(
+                        workspace_id,
+                        tenant_id,
+                        "execution.failed",
+                        {
+                            "execution_id": execution.get("execution_id"),
+                            "tool_name": execution.get("tool_name"),
+                            "error_code": "ENGINE_RESTARTED",
+                        },
+                    )
 
     def _workspace_dir(self, workspace_id: str) -> Path:
         candidate = (self.workspaces_dir / workspace_id).resolve()

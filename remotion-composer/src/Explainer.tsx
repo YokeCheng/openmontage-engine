@@ -10,7 +10,6 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { loadFont } from "@remotion/google-fonts/SpaceGrotesk";
 
 // Resolve asset path — handle URLs, absolute paths (Windows/Unix), and public/ relative paths
 function resolveAsset(src: string): string {
@@ -57,11 +56,10 @@ import { ProviderChip } from "./components/ProviderChip";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
 
-// Load Space Grotesk font for cinematic typography
-const { fontFamily } = loadFont("normal", {
-  weights: ["400", "700"],
-  subsets: ["latin"],
-});
+// Rendering must remain zero-key and offline-safe. Importing a Google font at
+// module scope makes every Remotion composition wait on fonts.gstatic.com,
+// including compositions that never render Explainer.
+const fontFamily = 'Inter, "Noto Sans SC", "PingFang SC", system-ui, sans-serif';
 
 // ---------------------------------------------------------------------------
 // Animated Background — Gradient Mesh + Floating Orbs
@@ -747,7 +745,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
   if (overlay.type === "section_title") {
     return (
       <SectionTitle
-        title={overlay.text}
+        title={overlay.text ?? ""}
         subtitle={overlay.subtitle}
         accentColor={overlay.accentColor}
         position={(overlay.position as any) || "top-left"}
@@ -757,7 +755,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
   if (overlay.type === "stat_reveal") {
     return (
       <StatReveal
-        stat={overlay.text}
+        stat={overlay.text ?? ""}
         label={overlay.subtitle}
         accentColor={overlay.accentColor}
         position={(overlay.position as any) || "bottom-right"}
@@ -765,7 +763,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
     );
   }
   if (overlay.type === "hero_title") {
-    return <HeroTitle title={overlay.text} subtitle={overlay.subtitle} />;
+    return <HeroTitle title={overlay.text ?? ""} subtitle={overlay.subtitle} />;
   }
   if (overlay.type === "provider_chip" && overlay.providers) {
     return (
