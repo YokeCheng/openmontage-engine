@@ -1,11 +1,9 @@
 name: animation
 version: "2.0"
 description: >
-  Animation-first pipeline for motion graphics, diagram-led explainers, kinetic typography,
-  math visuals, and stylized illustrative sequences. Features a research-first pre-production
-  phase: the agent researches the topic and animation techniques, proposes concepts with
-  animation mode selection and cost estimates, and gets explicit user approval before any
-  assets are generated.
+  面向动效、动态图表、公式讲解、文字动画和风格化插画序列的视频流程。
+  Agent 会先研究主题和动效表达方式，再提出创意方案、动画模式、预算和风险，
+  经用户批准后再进入素材、配音、合成和交付。
 category: animation
 stability: production
 default_checkpoint_policy: guided
@@ -20,6 +18,82 @@ reference_input:
     - video_downloader
     - scene_detect
     - frame_sampler
+
+platform_contract:
+  version: "1.0"
+  readiness: ready
+  intake_adapter: councilforge-video-brief-v1
+  status_reason: "可直接根据结构化主题 brief 创建动效解说视频，不强制要求上传源素材。"
+  input_modes:
+    - generated_from_brief
+    - reference_video_optional
+  supported_formats:
+    - product_intro
+    - knowledge_explainer
+  required_brief_fields:
+    - title
+    - objective
+    - format
+    - language
+    - audience
+    - channel
+    - duration_seconds
+    - aspect_ratio
+    - visual_style
+    - maximum_usd
+  optional_brief_fields:
+    - call_to_action
+    - visual_source
+    - image_provider
+    - video_provider
+    - voice
+    - voice_speed
+    - music
+    - subtitles
+    - fps
+    - source_materials
+  required_source_materials: []
+  capability_requirements:
+    - capability: video_post
+      required: true
+      fallback: remotion_motion_graphics
+      stage: compose
+    - capability: graphics
+      required: true
+      fallback: remotion_motion_graphics
+      stage: assets
+    - capability: tts
+      required: false
+      fallback: none
+      stage: assets
+    - capability: image_generation
+      required: false
+      fallback: motion_graphics
+      stage: assets
+    - capability: video_generation
+      required: false
+      fallback: motion_graphics
+      stage: assets
+    - capability: music_generation
+      required: false
+      fallback: none
+      stage: assets
+    - capability: music_search
+      required: false
+      fallback: none
+      stage: assets
+    - capability: music_library
+      required: false
+      fallback: none
+      stage: assets
+  approval_policy:
+    human_approval_stages:
+      - proposal
+      - script
+      - scene_plan
+      - assets
+      - publish
+  artifact_schema_contract: councilforge-video-agent-v1
 
 extensions:
   custom_scripts: true
@@ -184,6 +258,8 @@ stages:
       - diagram_gen
       - code_snippet
       - music_gen
+      - pixabay_music
+      - music_library
     tools_available:
       - tts_selector
       - image_selector
@@ -192,6 +268,8 @@ stages:
       - diagram_gen
       - code_snippet
       - music_gen
+      - pixabay_music
+      - music_library
     checkpoint_required: true
     human_approval_default: true
     review_focus:

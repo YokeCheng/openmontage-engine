@@ -313,6 +313,14 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
         item["capability"] for item in explainer["capability_requirements"]
     } >= {"video_post", "tts", "image_generation", "video_generation"}
 
+    animation = pipelines["animation"]["platform_contract"]
+    assert animation["readiness"] == "ready"
+    assert animation["intake_adapter"] == "councilforge-video-brief-v1"
+    assert animation["required_source_materials"] == []
+    assert {
+        item["capability"] for item in animation["capability_requirements"]
+    } >= {"video_post", "graphics", "tts", "music_library"}
+
     talking_head = pipelines["talking-head"]["platform_contract"]
     assert talking_head["readiness"] == "requires_input_adapter"
     assert talking_head["intake_adapter"] == "unavailable"
@@ -325,6 +333,10 @@ def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(client
     assert bundle["manifest"]["name"] == "animation"
     assert bundle["stages"]
     assert any(stage["instruction"] for stage in bundle["stages"])
+    assets_stage = next(
+        stage for stage in bundle["manifest"]["stages"] if stage["name"] == "assets"
+    )
+    assert "music_library" in assets_stage["tools_available"]
     assert client.get("/v1/pipelines/../../secrets/bundle").status_code == 404
 
 
