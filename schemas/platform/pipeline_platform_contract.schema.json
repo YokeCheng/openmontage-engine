@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmontage.dev/schemas/platform/pipeline-platform-contract-v2.json",
+  "title": "OpenMontage Pipeline Platform Contract v2",
+  "type": "object",
+  "required": [
+    "version",
+    "readiness",
+    "intake_adapter",
+    "intake_schema",
+    "status_reason",
+    "input_modes",
+    "supported_formats",
+    "required_brief_fields",
+    "optional_brief_fields",
+    "required_source_materials",
+    "capability_requirements",
+    "approval_policy",
+    "artifact_schema_contract",
+    "acceptance"
+  ],
+  "properties": {
+    "version": {"const": "2.0"},
+    "readiness": {
+      "type": "string",
+      "enum": ["validation", "ready", "requires_input_adapter", "disabled"]
+    },
+    "intake_adapter": {"type": "string", "minLength": 1},
+    "intake_schema": {"type": "string", "minLength": 1},
+    "status_reason": {"type": "string", "minLength": 1},
+    "input_modes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "supported_formats": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "required_brief_fields": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "optional_brief_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "required_source_materials": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "capability_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["capability", "required", "fallback", "stage"],
+        "properties": {
+          "capability": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"},
+          "fallback": {"type": "string", "minLength": 1},
+          "stage": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "approval_policy": {
+      "type": "object",
+      "required": ["human_approval_stages"],
+      "properties": {
+        "human_approval_stages": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "artifact_schema_contract": {"type": "string", "minLength": 1},
+    "acceptance": {
+      "type": "object",
+      "required": ["status", "required_evidence"],
+      "properties": {
+        "status": {"type": "string", "enum": ["pending_real_e2e", "validated", "failed"]},
+        "required_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["job_id", "workspace_id", "checkpoint_chain", "tool_executions", "artifact_manifest", "ffprobe", "playback", "download", "restart_recovery"]}
+        },
+        "evidence_id": {"type": "string", "minLength": 1},
+        "validated_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"readiness": {"const": "ready"}}},
+      "then": {
+        "properties": {
+          "acceptance": {
+            "required": ["evidence_id", "validated_at"],
+            "properties": {"status": {"const": "validated"}}
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

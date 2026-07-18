@@ -31,6 +31,7 @@ from .models import (
     RuntimeConfigRequest,
     WriteWorkspaceCheckpointRequest,
 )
+from .platform_contract import validate_pipeline_platform_contract
 from .scheduler import ExecutionScheduler
 from .store import EngineStore, TERMINAL, new_id, utc_now
 
@@ -59,10 +60,13 @@ def _pipeline_platform_contract(data: dict[str, Any]) -> dict[str, Any]:
             "approval_policy": {"human_approval_stages": []},
             "artifact_schema_contract": "",
         }
+    if str(contract.get("version") or "") == "2.0":
+        validate_pipeline_platform_contract(data)
     return {
         "version": str(contract.get("version") or "1.0"),
         "readiness": str(contract.get("readiness") or "requires_input_adapter"),
         "intake_adapter": str(contract.get("intake_adapter") or "unavailable"),
+        "intake_schema": str(contract.get("intake_schema") or ""),
         "status_reason": str(contract.get("status_reason") or ""),
         "input_modes": list(contract.get("input_modes") or []),
         "supported_formats": list(contract.get("supported_formats") or []),
@@ -72,6 +76,7 @@ def _pipeline_platform_contract(data: dict[str, Any]) -> dict[str, Any]:
         "capability_requirements": list(contract.get("capability_requirements") or []),
         "approval_policy": dict(contract.get("approval_policy") or {"human_approval_stages": []}),
         "artifact_schema_contract": str(contract.get("artifact_schema_contract") or ""),
+        "acceptance": dict(contract.get("acceptance") or {}),
     }
 
 

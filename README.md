@@ -66,6 +66,8 @@ uv run python scripts/export_engine_api_contract.py --check
 
 运行时 `GET /v1/contract` 发布同一份确定性清单，CouncilForge 在视频服务启动前校验其审核锁，未评审的协议漂移会直接阻止视频 Worker 启动。
 
+宿主平台的 Pipeline 可用性由 [Pipeline Platform Contract v2](docs/PIPELINE_PLATFORM_CONTRACT_V2.md) 管理。`validation` 表示已有真实适配器但尚未完成产品验收，`ready` 必须绑定真实端到端证据。规范位于 `schemas/platform/pipeline_platform_contract.schema.json`，其摘要也包含在 Engine 契约中。
+
 ## 当前平台接入
 
 CouncilForge 使用以下能力接口驱动 OpenMontage，而不是在引擎中启动第二个 Agent：

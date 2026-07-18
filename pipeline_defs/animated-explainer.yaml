@@ -21,10 +21,11 @@ reference_input:
     - frame_sampler
 
 platform_contract:
-  version: "1.0"
-  readiness: ready
+  version: "2.0"
+  readiness: validation
   intake_adapter: councilforge-video-brief-v1
-  status_reason: "可直接根据结构化主题 brief 创建，不强制要求上传源素材。"
+  intake_schema: councilforge-video-brief-v1
+  status_reason: "已具备结构化 Brief 接入合同，完成同一条真实中文视频全链路验收后才升级为 ready。"
   input_modes:
     - generated_from_brief
     - reference_video_optional
@@ -60,12 +61,12 @@ platform_contract:
       fallback: remotion_motion_graphics
       stage: compose
     - capability: tts
-      required: false
-      fallback: none
+      required: true
+      fallback: block
       stage: assets
     - capability: image_generation
-      required: false
-      fallback: motion_graphics
+      required: true
+      fallback: block
       stage: assets
     - capability: video_generation
       required: false
@@ -91,6 +92,18 @@ platform_contract:
       - assets
       - publish
   artifact_schema_contract: councilforge-video-agent-v1
+  acceptance:
+    status: pending_real_e2e
+    required_evidence:
+      - job_id
+      - workspace_id
+      - checkpoint_chain
+      - tool_executions
+      - artifact_manifest
+      - ffprobe
+      - playback
+      - download
+      - restart_recovery
 
 extensions:
   custom_scripts: true

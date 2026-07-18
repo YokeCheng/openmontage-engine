@@ -305,8 +305,11 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
     pipelines = {item["name"]: item for item in response.json()["pipelines"]}
 
     explainer = pipelines["animated-explainer"]["platform_contract"]
-    assert explainer["readiness"] == "ready"
+    assert explainer["version"] == "2.0"
+    assert explainer["readiness"] == "validation"
     assert explainer["intake_adapter"] == "councilforge-video-brief-v1"
+    assert explainer["intake_schema"] == "councilforge-video-brief-v1"
+    assert explainer["acceptance"]["status"] == "pending_real_e2e"
     assert "knowledge_explainer" in explainer["supported_formats"]
     assert explainer["required_source_materials"] == []
     assert {
