@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -38,6 +39,9 @@ from .store import EngineStore, TERMINAL, new_id, utc_now
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME_CONFIG_LOCK = threading.RLock()
+_RUNTIME_CONFIG_DIGEST: str | None = None
+_RUNTIME_CONFIG_SNAPSHOT: dict[str, Any] | None = None
+_ALLOWED_RUNTIME_FIELDS: set[str] | None = None
 _SECRET_FIELD_PATTERN = re.compile(
     r"\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|KEY|TOKEN|SECRET|CREDENTIALS|URL)|VIDEO_GEN_LOCAL_ENABLED|MUSIC_LIBRARY_DIR)\b"
 )
@@ -186,11 +190,59 @@ def _provider_catalog() -> dict[str, Any]:
 
 
 def _allowed_runtime_fields() -> set[str]:
-    return {
-        field
-        for provider in _provider_catalog()["providers"]
-        for field in provider.get("credential_fields", [])
-    }
+    global _ALLOWED_RUNTIME_FIELDS
+    with _RUNTIME_CONFIG_LOCK:
+        if _ALLOWED_RUNTIME_FIELDS is None:
+            _ALLOWED_RUNTIME_FIELDS = {
+                field
+                for provider in _provider_catalog()["providers"]
+                for field in provider.get("credential_fields", [])
+            }
+        return set(_ALLOWED_RUNTIME_FIELDS)
+
+
+def _apply_runtime_config(values: dict[str, str | None]) -> dict[str, Any]:
+    """Apply ephemeral credentials without blocking the FastAPI event loop.
+
+    Gateway, Worker, and health diagnostics may submit the same configuration
+    during startup. A digest lets identical requests reuse the already
+    refreshed registry while retaining only a one-way hash and public
+    capability metadata in memory.
+    """
+
+    global _RUNTIME_CONFIG_DIGEST, _RUNTIME_CONFIG_SNAPSHOT
+    digest = hashlib.sha256(
+        json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    with _RUNTIME_CONFIG_LOCK:
+        environment_matches = all(
+            os.environ.get(key) == value if value else key not in os.environ
+            for key, value in values.items()
+        )
+        if (
+            digest == _RUNTIME_CONFIG_DIGEST
+            and environment_matches
+            and _RUNTIME_CONFIG_SNAPSHOT is not None
+        ):
+            return dict(_RUNTIME_CONFIG_SNAPSHOT)
+
+        for key, value in values.items():
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        from tools.tool_registry import registry
+
+        registry.clear()
+        registry.discover()
+        snapshot = {
+            "configured_fields": sorted(key for key, value in values.items() if value),
+            "capabilities": _provider_capabilities(),
+            "providers": _provider_catalog()["providers"],
+        }
+        _RUNTIME_CONFIG_DIGEST = digest
+        _RUNTIME_CONFIG_SNAPSHOT = snapshot
+        return dict(snapshot)
 
 
 def _pipeline_bundle(pipeline_name: str) -> dict[str, Any]:
@@ -347,25 +399,8 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 "RUNTIME_CONFIG_FIELD_UNSUPPORTED",
                 request,
             )
-        with _RUNTIME_CONFIG_LOCK:
-            for key, value in body.values.items():
-                if value:
-                    os.environ[key] = value
-                else:
-                    os.environ.pop(key, None)
-            from tools.tool_registry import registry
-
-            registry.clear()
-            registry.discover()
-        return JSONResponse(
-            content={
-                "configured_fields": sorted(key for key, value in body.values.items() if value),
-                "capabilities": _provider_capabilities(),
-                # Returning the refreshed registry avoids a second expensive
-                # discovery request from the platform after every save.
-                "providers": _provider_catalog()["providers"],
-            }
-        )
+        snapshot = await asyncio.to_thread(_apply_runtime_config, body.values)
+        return JSONResponse(content=snapshot)
 
     @app.get("/v1/pipelines", operation_id="list_engine_pipelines")
     async def pipelines(_: None = Depends(authorize_service)) -> dict[str, Any]:

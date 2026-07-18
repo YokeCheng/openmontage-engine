@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -280,6 +282,12 @@ def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephe
         )
         assert configured.status_code == 200
         assert configured.json()["configured_fields"] == ["PIXABAY_API_KEY"]
+        repeated = client.put(
+            "/v1/runtime/config",
+            json={"values": {"PIXABAY_API_KEY": "runtime-only-secret"}},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json() == configured.json()
         runtime_text = "\n".join(
             path.read_text(errors="ignore")
             for path in client.app.state.store.root.rglob("*")
@@ -297,6 +305,39 @@ def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephe
     rejected = client.put("/v1/runtime/config", json={"values": {"NOT_A_PROVIDER_FIELD": "secret"}})
     assert rejected.status_code == 422
     assert rejected.json()["error_code"] == "RUNTIME_CONFIG_FIELD_UNSUPPORTED"
+
+
+def test_runtime_configuration_refresh_does_not_block_health(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh(values: dict[str, str | None]) -> dict:
+        started.set()
+        assert release.wait(timeout=3)
+        return {
+            "configured_fields": sorted(key for key, value in values.items() if value),
+            "capabilities": {},
+            "providers": [],
+        }
+
+    monkeypatch.setattr("engine_api.app._allowed_runtime_fields", lambda: {"PIXABAY_API_KEY"})
+    monkeypatch.setattr("engine_api.app._apply_runtime_config", slow_refresh)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            client.put,
+            "/v1/runtime/config",
+            json={"values": {"PIXABAY_API_KEY": "runtime-only-secret"}},
+        )
+        assert started.wait(timeout=2)
+        health = client.get("/v1/health")
+        assert health.status_code == 200
+        assert health.json()["ready"] is True
+        release.set()
+        assert pending.result(timeout=3).status_code == 200
 
 
 def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient) -> None:
