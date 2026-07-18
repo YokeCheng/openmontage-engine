@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from .capability_gateway import CapabilityGateway
+from .contract import ENGINE_API_VERSION, build_contract_manifest
 from .models import (
     ApproveRequest,
     CancelRequest,
@@ -260,7 +261,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         scheduler.shutdown()
         gateway.shutdown()
 
-    app = FastAPI(title="OpenMontage Engine API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="OpenMontage Engine API", version=ENGINE_API_VERSION, lifespan=lifespan)
     app.state.store = store
     app.state.scheduler = scheduler
     app.state.capability_gateway = gateway
@@ -286,11 +287,17 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
         return job
 
-    @app.get("/v1/health")
-    async def health() -> dict[str, Any]:
-        return {"status": "ok", "ready": True, "version": "1.0.0"}
+    @app.get("/v1/contract", operation_id="get_engine_contract")
+    async def engine_contract(_: None = Depends(authorize_service)) -> dict[str, Any]:
+        """Publish the deterministic transport and schema compatibility manifest."""
 
-    @app.get("/v1/capabilities")
+        return build_contract_manifest(app)
+
+    @app.get("/v1/health", operation_id="get_engine_health")
+    async def health() -> dict[str, Any]:
+        return {"status": "ok", "ready": True, "version": ENGINE_API_VERSION}
+
+    @app.get("/v1/capabilities", operation_id="get_engine_capabilities")
     async def capabilities(_: None = Depends(authorize_service)) -> dict[str, Any]:
         menu = await asyncio.to_thread(_provider_capabilities)
         return {
@@ -315,11 +322,11 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             "tool_execution_api": "capability-gateway-v1",
         }
 
-    @app.get("/v1/providers")
+    @app.get("/v1/providers", operation_id="list_engine_providers")
     async def providers(_: None = Depends(authorize_service)) -> dict[str, Any]:
         return await asyncio.to_thread(_provider_catalog)
 
-    @app.put("/v1/runtime/config")
+    @app.put("/v1/runtime/config", operation_id="configure_engine_runtime")
     async def configure_runtime(
         body: RuntimeConfigRequest,
         request: Request,
@@ -355,7 +362,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             }
         )
 
-    @app.get("/v1/pipelines")
+    @app.get("/v1/pipelines", operation_id="list_engine_pipelines")
     async def pipelines(_: None = Depends(authorize_service)) -> dict[str, Any]:
         return {
             "pipelines": _pipeline_catalog(),
@@ -367,7 +374,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             },
         }
 
-    @app.get("/v1/pipelines/{pipeline_name}/bundle")
+    @app.get("/v1/pipelines/{pipeline_name}/bundle", operation_id="get_engine_pipeline_bundle")
     async def pipeline_bundle(
         pipeline_name: str,
         request: Request,
@@ -381,25 +388,25 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return problem(404, "Pipeline not found", "The requested pipeline does not exist.", "PIPELINE_NOT_FOUND", request)
         return JSONResponse(content=bundle)
 
-    @app.get("/v1/tools")
+    @app.get("/v1/tools", operation_id="list_engine_tools")
     async def tools_catalog(_: None = Depends(authorize_service)) -> dict[str, Any]:
         return {"tools": await asyncio.to_thread(gateway.tool_catalog)}
 
-    @app.get("/v1/tools/{tool_name}")
+    @app.get("/v1/tools/{tool_name}", operation_id="get_engine_tool")
     async def tool_contract(tool_name: str, _: None = Depends(authorize_service)) -> dict[str, Any]:
         tool = await asyncio.to_thread(gateway.tool_info, tool_name)
         if tool is None:
             raise HTTPException(status_code=404, detail="Tool not found")
         return tool
 
-    @app.get("/v1/agent-skills/{skill_name}")
+    @app.get("/v1/agent-skills/{skill_name}", operation_id="get_engine_agent_skill")
     async def agent_skill(skill_name: str, _: None = Depends(authorize_service)) -> dict[str, Any]:
         skill = await asyncio.to_thread(gateway.agent_skill, skill_name)
         if skill is None:
             raise HTTPException(status_code=404, detail="Agent skill not found")
         return skill
 
-    @app.post("/v1/workspaces", status_code=201)
+    @app.post("/v1/workspaces", status_code=201, operation_id="create_engine_workspace")
     async def create_workspace(
         body: CreateWorkspaceRequest,
         request: Request,
@@ -426,14 +433,14 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return problem(422, "Invalid workspace", str(exc), "WORKSPACE_INVALID", request)
         return JSONResponse(status_code=201 if created else 200, content=workspace)
 
-    @app.get("/v1/workspaces/{workspace_id}")
+    @app.get("/v1/workspaces/{workspace_id}", operation_id="get_engine_workspace")
     async def get_workspace(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         workspace = await asyncio.to_thread(gateway.load_workspace, workspace_id, tenant_id)
         if workspace is None:
             raise HTTPException(status_code=404, detail="Workspace not found")
         return workspace
 
-    @app.get("/v1/workspaces/{workspace_id}/stages/{stage_name}/context")
+    @app.get("/v1/workspaces/{workspace_id}/stages/{stage_name}/context", operation_id="get_engine_stage_context")
     async def stage_context(workspace_id: str, stage_name: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(gateway.stage_context, workspace_id, tenant_id, stage_name)
@@ -442,7 +449,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=500, detail=f"Pipeline skill is unavailable: {exc}") from exc
 
-    @app.post("/v1/workspaces/{workspace_id}/executions", status_code=202)
+    @app.post("/v1/workspaces/{workspace_id}/executions", status_code=202, operation_id="create_engine_tool_execution")
     async def create_tool_execution(
         workspace_id: str,
         body: CreateToolExecutionRequest,
@@ -474,28 +481,28 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return problem(409, "Tool is unavailable", str(exc), "TOOL_UNAVAILABLE", request)
         return JSONResponse(status_code=202 if created else 200, content=execution)
 
-    @app.get("/v1/workspaces/{workspace_id}/executions/{execution_id}")
+    @app.get("/v1/workspaces/{workspace_id}/executions/{execution_id}", operation_id="get_engine_tool_execution")
     async def get_tool_execution(workspace_id: str, execution_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(gateway.get_execution, workspace_id, tenant_id, execution_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
-    @app.post("/v1/workspaces/{workspace_id}/executions/{execution_id}/cancel")
+    @app.post("/v1/workspaces/{workspace_id}/executions/{execution_id}/cancel", operation_id="cancel_engine_tool_execution")
     async def cancel_tool_execution(workspace_id: str, execution_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(gateway.cancel_execution, workspace_id, tenant_id, execution_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
-    @app.post("/v1/workspaces/{workspace_id}/cancel")
+    @app.post("/v1/workspaces/{workspace_id}/cancel", operation_id="cancel_engine_workspace")
     async def cancel_workspace(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(gateway.cancel_workspace, workspace_id, tenant_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
-    @app.get("/v1/workspaces/{workspace_id}/events")
+    @app.get("/v1/workspaces/{workspace_id}/events", operation_id="list_engine_workspace_events")
     async def workspace_events(
         workspace_id: str,
         request: Request,
@@ -520,7 +527,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
 
         return StreamingResponse(stream_workspace_events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
-    @app.put("/v1/workspaces/{workspace_id}/checkpoint")
+    @app.put("/v1/workspaces/{workspace_id}/checkpoint", operation_id="write_engine_workspace_checkpoint")
     async def write_workspace_checkpoint(
         workspace_id: str,
         body: WriteWorkspaceCheckpointRequest,
@@ -535,7 +542,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             return problem(422, "Checkpoint rejected", str(exc), "CHECKPOINT_INVALID", request)
         return JSONResponse(content=checkpoint)
 
-    @app.get("/v1/workspaces/{workspace_id}/checkpoint")
+    @app.get("/v1/workspaces/{workspace_id}/checkpoint", operation_id="get_engine_workspace_checkpoint")
     async def latest_workspace_checkpoint(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             checkpoint = await asyncio.to_thread(gateway.latest_checkpoint, workspace_id, tenant_id)
@@ -543,7 +550,7 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Workspace not found") from exc
         return {"checkpoint": checkpoint}
 
-    @app.get("/v1/workspaces/{workspace_id}/artifacts")
+    @app.get("/v1/workspaces/{workspace_id}/artifacts", operation_id="list_engine_workspace_artifacts")
     async def workspace_artifacts(workspace_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         try:
             items = await asyncio.to_thread(gateway.artifacts, workspace_id, tenant_id)
@@ -551,7 +558,10 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Workspace not found") from exc
         return {"artifacts": items}
 
-    @app.get("/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content")
+    @app.get(
+        "/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content",
+        operation_id="get_engine_workspace_artifact_content",
+    )
     async def workspace_artifact_content(
         workspace_id: str,
         artifact_id: str,

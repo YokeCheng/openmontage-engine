@@ -4,6 +4,23 @@
 适用范围：CouncilForge ↔ OpenMontage Engine
 协议前缀：`/v1`
 
+## 规范来源与兼容规则
+
+- `schemas/api/engine_api.openapi.json` 是 HTTP 路径、方法、operationId 和请求模型的规范快照；
+- `schemas/api/engine_api.schema.json` 是 Engine v1 公共对象的规范 JSON Schema；
+- `schemas/artifacts/*.schema.json` 是 Pipeline 标准阶段产物的规范来源；
+- `schemas/api/engine_api.contract.json` 将版本、必需 Capability operation 和上述来源摘要合成一个确定性清单；
+- `GET /v1/contract` 在运行时发布与提交清单相同的兼容表面。
+
+只允许增加可选字段或新操作等经评审的向后兼容变化。删除/重命名 operation、删除字段、收紧已有输入或改变非扩展枚举语义属于破坏性变化，必须进入 `/v2` 并提升 API 主版本。任何变更先运行：
+
+```bash
+uv run python scripts/export_engine_api_contract.py
+uv run python scripts/export_engine_api_contract.py --check
+```
+
+CouncilForge 保存审核锁并在视频服务启动前比较 API/Schema 主版本、必需 operation 和三个规范来源摘要。即使是兼容增加，也必须由 CouncilForge 显式更新锁后才能部署，避免两个独立仓库静默漂移。
+
 ## 1. 设计目标
 
 OpenMontage Engine 是异步视频执行引擎，不是第二个 Agent 大脑。CouncilForge 完成用户需求理解、内容决策、模型推理和业务编排，再向引擎提交结构化、可执行的视频任务。
@@ -12,6 +29,7 @@ OpenMontage Engine 是异步视频执行引擎，不是第二个 Agent 大脑。
 
 ## Capability Workspace API
 
+- `GET /v1/contract`：读取版本、必需 operation 和规范 Schema 摘要；
 - `GET /v1/tools`、`GET /v1/tools/{tool_name}`：读取工具契约和实时可用状态；
 - `GET /v1/agent-skills/{skill_name}`：读取工具声明的运行指导；
 - `POST /v1/workspaces`、`GET /v1/workspaces/{workspace_id}`：创建和读取租户隔离的生产工作区；
