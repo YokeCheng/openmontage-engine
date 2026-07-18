@@ -134,6 +134,86 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _srt_timestamp(seconds: float) -> str:
+    milliseconds = max(0, round(float(seconds) * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _subtitle_text(value: Any) -> str:
+    return str(value or "").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _caption_chunks(text: str, *, language: str) -> list[str]:
+    """Split approved subtitle text into readable Remotion caption tokens."""
+
+    cleaned = _subtitle_text(text)
+    if not cleaned:
+        return []
+    has_cjk = language.lower().startswith("zh") or any("\u4e00" <= ch <= "\u9fff" for ch in cleaned)
+    if not has_cjk:
+        return [part for part in cleaned.split() if part]
+
+    chunks: list[str] = []
+    current = ""
+    hard_breaks = set("，。！？；：、,.!?;:")
+    for char in cleaned:
+        if char.isspace():
+            continue
+        current += char
+        if char in hard_breaks or len(current) >= 6:
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _build_subtitle_payload(
+    sections: list[dict[str, Any]], *, language: str
+) -> tuple[str, list[dict[str, Any]], str]:
+    """Return SRT text, Remotion word captions and preferred token joiner."""
+
+    srt_blocks: list[str] = []
+    captions: list[dict[str, Any]] = []
+    has_cjk = language.lower().startswith("zh")
+    for index, section in enumerate(sections, start=1):
+        text = _subtitle_text(section.get("text"))
+        if not text:
+            continue
+        start = float(section.get("start_seconds") or 0)
+        end = max(start + 0.25, float(section.get("end_seconds") or start + 1))
+        srt_blocks.append(f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text}")
+
+        chunks = _caption_chunks(text, language=language)
+        if not chunks:
+            continue
+        has_cjk = has_cjk or any("\u4e00" <= ch <= "\u9fff" for ch in text)
+        total_chars = sum(max(1, len(chunk)) for chunk in chunks)
+        cursor = start
+        duration = end - start
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index == len(chunks) - 1:
+                chunk_end = end
+            else:
+                chunk_end = cursor + duration * (max(1, len(chunk)) / total_chars)
+            captions.append(
+                {
+                    "word": chunk,
+                    "startMs": int(round(cursor * 1000)),
+                    "endMs": int(round(chunk_end * 1000)),
+                }
+            )
+            cursor = chunk_end
+    return (
+        "\n\n".join(srt_blocks) + ("\n" if srt_blocks else ""),
+        captions,
+        "" if has_cjk else " ",
+    )
+
+
 def _media_metadata(path: Path, media_type: str) -> dict[str, Any]:
     """Return best-effort technical metadata without making artifact delivery fail."""
 
@@ -418,6 +498,7 @@ class CapabilityGateway:
         result = dict(inputs)
         if tool_name == "video_compose":
             result = self._materialize_allowed_external_inputs(workspace_dir, stage_name, result)
+            result = self._materialize_virtual_subtitles(workspace_dir, stage_name, result)
             if not result.get("output_path"):
                 result["output_path"] = str(workspace_dir / "renders" / "final.mp4")
             return result
@@ -496,6 +577,69 @@ class CapabilityGateway:
 
         materialized = walk("", inputs)
         return materialized if isinstance(materialized, dict) else dict(inputs)
+
+    def _materialize_virtual_subtitles(
+        self,
+        workspace_dir: Path,
+        stage_name: str,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Turn CouncilForge structured subtitle references into real files.
+
+        The platform Agent may produce ``edit_decisions.subtitles.source`` as a
+        logical value such as ``script-sections:s1,s2`` because the approved
+        script is already structured.  The upstream ``video_compose`` tool,
+        however, intentionally deals in concrete media paths.  This adapter
+        bridges the two without teaching the tool about CouncilForge-specific
+        workflow state.
+        """
+
+        edit_decisions = inputs.get("edit_decisions")
+        if not isinstance(edit_decisions, dict):
+            return inputs
+        subtitles = edit_decisions.get("subtitles")
+        if not isinstance(subtitles, dict) or not subtitles.get("enabled"):
+            return inputs
+        source = subtitles.get("source")
+        if not (
+            isinstance(source, str)
+            and source.startswith("script-sections:")
+        ):
+            return inputs
+        metadata = edit_decisions.get("metadata")
+        sections = metadata.get("subtitle_sections") if isinstance(metadata, dict) else None
+        if not isinstance(sections, list) or not sections:
+            return inputs
+
+        language = (
+            str(metadata.get("language") or "zh-CN")
+            if isinstance(metadata, dict)
+            else "zh-CN"
+        )
+        srt_text, captions, joiner = _build_subtitle_payload(
+            [section for section in sections if isinstance(section, dict)],
+            language=language,
+        )
+        if not srt_text:
+            return inputs
+
+        subtitle_dir = workspace_dir / "tool-inputs" / stage_name / "subtitles"
+        subtitle_path = subtitle_dir / "script-sections.srt"
+        subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+        subtitle_path.write_text(srt_text, encoding="utf-8")
+
+        result = deepcopy(inputs)
+        result_edit = deepcopy(edit_decisions)
+        result_subtitles = deepcopy(subtitles)
+        result_subtitles["source"] = str(subtitle_path)
+        result_subtitles["source_type"] = "generated_srt"
+        result_edit["subtitles"] = result_subtitles
+        if captions:
+            result_edit["captions"] = captions
+            result_edit["captionJoiner"] = joiner
+        result["edit_decisions"] = result_edit
+        result.setdefault("subtitle_path", str(subtitle_path))
+        return result
 
     def create_execution(
         self,

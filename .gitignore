@@ -24,6 +24,7 @@ htmlcov/
 output/
 pipeline/
 tests/qa/output/
+exports/
 
 # Project workspaces (generated assets, renders — all regenerable)
 projects/

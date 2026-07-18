@@ -313,6 +313,7 @@ export interface ExplainerProps {
   cuts: Cut[];
   overlays?: Overlay[];
   captions?: WordCaption[];
+  captionJoiner?: string;
   audio?: AudioConfig;
   render?: {
     width?: number;
@@ -784,7 +785,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
 // ---------------------------------------------------------------------------
 
 export const Explainer: React.FC<ExplainerProps> = (props) => {
-  const { cuts, overlays, captions, audio } = props;
+  const { cuts, overlays, captions, captionJoiner, audio } = props;
   const { fps, durationInFrames } = useVideoConfig();
 
   // Resolve theme from props — playbook name, theme name, or custom themeConfig
@@ -829,6 +830,7 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
           fontSize={42}
           highlightColor={theme.captionHighlightColor}
           backgroundColor={theme.captionBackgroundColor}
+          joiner={captionJoiner ?? " "}
         />
       )}
 

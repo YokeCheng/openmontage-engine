@@ -813,6 +813,86 @@ def test_capability_gateway_injects_workspace_local_video_compose_output_path(
     assert execution["artifacts"][0]["path"] == "renders/final.mp4"
 
 
+def test_capability_gateway_materializes_script_section_subtitles_for_video_compose(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-video-compose-subtitles")
+    workspace_id = workspace["workspace_id"]
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    video_compose = registry.get("video_compose")
+    assert video_compose is not None
+
+    seen_inputs: dict[str, object] = {}
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        seen_inputs.update(inputs)
+        output = Path(str(inputs["output_path"]))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"workspace-local-video")
+        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(video_compose, "execute", fake_execute)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="video-compose-subtitles"),
+        json={
+            "stage": "compose",
+            "tool_name": "video_compose",
+            "inputs": {
+                "edit_decisions": {
+                    "cuts": [
+                        {
+                            "id": "scene-1",
+                            "type": "text_card",
+                            "text": "CouncilForge",
+                            "in_seconds": 0,
+                            "out_seconds": 3,
+                        }
+                    ],
+                    "subtitles": {
+                        "enabled": True,
+                        "source": "script-sections:s1",
+                    },
+                    "metadata": {
+                        "language": "zh-CN",
+                        "subtitle_sections": [
+                            {
+                                "section_id": "s1",
+                                "start_seconds": 0,
+                                "end_seconds": 3,
+                                "text": "这是中文平台字幕。",
+                            }
+                        ],
+                    },
+                }
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    edit_decisions = seen_inputs["edit_decisions"]  # type: ignore[index]
+    subtitle_path = Path(str(edit_decisions["subtitles"]["source"]))  # type: ignore[index]
+    assert workspace_id in subtitle_path.parts
+    assert subtitle_path.name == "script-sections.srt"
+    assert "这是中文平台字幕。" in subtitle_path.read_text(encoding="utf-8")
+    assert seen_inputs["subtitle_path"] == str(subtitle_path)
+    assert edit_decisions["captions"]  # type: ignore[index]
+    assert edit_decisions["captionJoiner"] == ""  # type: ignore[index]
+
+
 def test_capability_gateway_materializes_local_music_library_inputs_for_video_compose(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

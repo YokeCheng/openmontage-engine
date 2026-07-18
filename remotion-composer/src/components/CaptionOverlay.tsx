@@ -23,6 +23,7 @@ interface CaptionOverlayProps extends Record<string, unknown> {
   highlightColor?: string;
   backgroundColor?: string;
   fontFamily?: string;
+  joiner?: string;
 }
 
 interface CaptionPage {
@@ -52,7 +53,8 @@ const PageRenderer: React.FC<{
   highlightColor: string;
   backgroundColor: string;
   fontFamily: string;
-}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily }) => {
+  joiner: string;
+}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, joiner }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -107,7 +109,7 @@ const PageRenderer: React.FC<{
                     : "0 2px 4px rgba(0,0,0,0.5)",
                 }}
               >
-                {w.word}{i < page.words.length - 1 ? " " : ""}
+                {w.word}{i < page.words.length - 1 ? joiner : ""}
               </span>
             );
           })}
@@ -125,6 +127,7 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
   highlightColor = "#22D3EE",
   backgroundColor = "rgba(15, 23, 42, 0.75)",
   fontFamily = "Space Grotesk, Inter, system-ui, sans-serif",
+  joiner = " ",
 }) => {
   const { fps } = useVideoConfig();
   const pages = buildPages(words, wordsPerPage);
@@ -148,6 +151,7 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
               highlightColor={highlightColor}
               backgroundColor={backgroundColor}
               fontFamily={fontFamily}
+              joiner={joiner}
             />
           </Sequence>
         );
