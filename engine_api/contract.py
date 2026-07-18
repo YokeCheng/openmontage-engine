@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 API_SCHEMA_PATH = REPO_ROOT / "schemas" / "api" / "engine_api.schema.json"
 ARTIFACT_SCHEMA_ROOT = REPO_ROOT / "schemas" / "artifacts"
 PLATFORM_SCHEMA_ROOT = REPO_ROOT / "schemas" / "platform"
+PIPELINE_SCHEMA_ROOT = REPO_ROOT / "schemas" / "pipelines"
 
 # These operation IDs are the stable CouncilForge capability boundary.  The
 # legacy engine-managed /v1/jobs endpoints remain public during migration, but
@@ -98,6 +99,10 @@ def build_contract_manifest(app: FastAPI, *, openapi: dict[str, Any] | None = No
         path.relative_to(REPO_ROOT).as_posix(): sha256_file(path)
         for path in sorted(PLATFORM_SCHEMA_ROOT.glob("*.schema.json"))
     }
+    pipeline_schemas = {
+        path.relative_to(REPO_ROOT).as_posix(): sha256_file(path)
+        for path in sorted(PIPELINE_SCHEMA_ROOT.glob("*.schema.json"))
+    }
     required_operations = [
         {"operation_id": operation_id, "method": method, "path": path}
         for operation_id, (method, path) in REQUIRED_CAPABILITY_OPERATIONS.items()
@@ -131,6 +136,10 @@ def build_contract_manifest(app: FastAPI, *, openapi: dict[str, Any] | None = No
             "platform_schemas": {
                 "sha256": sha256_bytes(canonical_json_bytes(platform_schemas)),
                 "files": platform_schemas,
+            },
+            "pipeline_schemas": {
+                "sha256": sha256_bytes(canonical_json_bytes(pipeline_schemas)),
+                "files": pipeline_schemas,
             },
         },
         "required_capability_operations": required_operations,

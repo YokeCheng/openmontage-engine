@@ -157,9 +157,10 @@
         "version": { "type": "string" },
         "readiness": {
           "type": "string",
-          "enum": ["ready", "requires_input_adapter", "disabled"]
+          "enum": ["validation", "ready", "requires_input_adapter", "disabled"]
         },
         "intake_adapter": { "type": "string" },
+        "intake_schema": { "type": "string" },
         "status_reason": { "type": "string" },
         "input_modes": { "type": "array", "items": { "type": "string" } },
         "supported_formats": { "type": "array", "items": { "type": "string" } },
@@ -190,7 +191,25 @@
           },
           "additionalProperties": false
         },
-        "artifact_schema_contract": { "type": "string" }
+        "artifact_schema_contract": { "type": "string" },
+        "acceptance": {
+          "type": "object",
+          "required": ["status", "required_evidence"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["pending_real_e2e", "validated", "failed"]
+            },
+            "required_evidence": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            },
+            "evidence_id": { "type": "string" },
+            "validated_at": { "type": "string", "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

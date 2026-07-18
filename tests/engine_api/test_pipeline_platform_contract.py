@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from engine_api.platform_contract import PipelinePlatformContractError, REPO_ROOT, validate_pipeline_platform_contract
+from lib.pipeline_loader import load_pipeline_readonly
 
 
 def _animated_explainer() -> dict:
@@ -24,6 +25,13 @@ def test_animated_explainer_v2_contract_is_valid_but_awaits_real_e2e() -> None:
         "tts",
         "image_generation",
     }
+
+
+def test_animated_explainer_v2_is_accepted_by_canonical_pipeline_manifest_schema() -> None:
+    manifest = load_pipeline_readonly("animated-explainer")
+
+    assert manifest["platform_contract"]["version"] == "2.0"
+    assert manifest["platform_contract"]["readiness"] == "validation"
 
 
 def test_ready_requires_real_e2e_evidence_identity_and_timestamp() -> None:
