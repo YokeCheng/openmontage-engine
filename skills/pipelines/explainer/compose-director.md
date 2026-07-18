@@ -43,7 +43,7 @@ Read `edit_decisions.render_runtime` before anything else. It was locked at prop
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["edit"]["edit_decisions"]`, `state.artifacts["assets"]["asset_manifest"]` | What to render |
 | Playbook | Active style playbook | Quality targets |
-| Tools | `video_compose`, `audio_mixer` | Rendering capabilities |
+| Tools | `video_compose` | Authoritative Remotion render; `audio_mixer` is only an approved FFmpeg fallback |
 | Media profiles | `lib/media_profiles.py` | Output format specs (resolution, codec, bitrate) |
 
 ## Process
@@ -71,82 +71,23 @@ Based on the edit decisions, pick the rendering approach:
 - Subtitles → Remotion `captions` prop (word-level), NOT SRT burn via FFmpeg
 - Text overlays (CTA, titles) → Remotion `text_card` cut type, NOT AI-generated images
 
-### Step 2: Audio Acquisition (Narration, Music, Subtitles)
+### Step 2: Consume Approved Media (CouncilForge Binding)
 
-Before rendering, present the user with audio options and get their preferences.
+Do not acquire, regenerate, or re-select narration, music, images, or subtitles
+in compose. Those decisions and provider calls belong to the approved `assets`
+checkpoint. Resolve only stable IDs from `edit_decisions` against the complete
+`asset_manifest`:
 
-**Present to the user:**
+- `audio.narration.segments[].asset_id` → approved narration file;
+- `audio.music.asset_id` → approved music file when music is enabled;
+- `subtitles.source` → approved SRT asset ID;
+- `cuts[].source` → approved image/video asset ID.
 
-> **Audio setup for this video:**
->
-> **Narration:** I can generate TTS narration using OpenAI TTS (`gpt-4o-mini-tts` — $0.015/min, 6 voices, voice direction). Which voice and tone would you like? I'll propose a voice based on the video topic, or you can choose:
-> - `onyx` — deep, authoritative (documentaries, tech)
-> - `echo` — resonant, futuristic (product ads, sci-fi)
-> - `nova` — bright, energetic (upbeat, explainers)
-> - `fable` — warm, storytelling (narratives, education)
-> - `shimmer` — expressive, warm (organic, lifestyle)
-> - `alloy` — neutral, balanced (general purpose)
->
-> **Music:** I can automatically find royalty-free background music from Pixabay (no key needed). If you have a `FREESOUND_API_KEY`, I can also search Freesound as a backup.
->
-> **Subtitles:** I'll generate word-level subtitles using WhisperX transcription of the final narration, burned into the video via Remotion captions.
->
-> Want me to proceed with my recommendations, or adjust anything?
-
-**After user confirms:**
-
-1. **Write narration script with duration budget** (see scene-director Step 4b):
-   - Calculate video duration from cuts
-   - Budget at 85-90% of video duration
-   - Use 2.0-2.5 words/sec for documentary, 2.5-3.0 for energetic
-   - Verify word count before generating TTS
-
-2. **Generate TTS narration:**
-   ```python
-   from tools.audio.openai_tts import OpenAITTS
-   result = OpenAITTS().execute({
-       'text': narration_script,
-       'voice': '<user-chosen or agent-recommended>',
-       'instructions': '<voice direction matching video tone>',
-       'output_path': 'path/to/narration.mp3',
-   })
-   # CRITICAL: Check result.data['audio_duration_seconds'] vs video duration
-   # If narration exceeds video by >1s: shorten script and regenerate
-   ```
-
-3. **Download background music:**
-   ```python
-   from tools.audio.pixabay_music import PixabayMusic
-   result = PixabayMusic().execute({
-       'query': '<mood/genre matching video topic>',
-       'min_duration': video_duration_seconds,
-       'max_duration': 300,
-       'output_path': 'path/to/music.mp3',
-   })
-   ```
-
-4. **Generate subtitles via WhisperX:**
-   ```python
-   from tools.analysis.transcriber import Transcriber
-   result = Transcriber().execute({
-       'input_path': 'path/to/narration.mp3',
-       'model_size': 'base',
-       'language': 'en',
-   })
-   # Convert word_timestamps to Remotion caption format:
-   # [{ "word": "Hello", "startMs": 0, "endMs": 340 }, ...]
-   ```
-
-5. **Assemble composition JSON** with audio config:
-   ```json
-   {
-     "audio": {
-       "narration": { "src": "path/to/narration.mp3", "volume": 1 },
-       "music": { "src": "path/to/music.mp3", "volume": 0.1, "fadeInSeconds": 2, "fadeOutSeconds": 3 }
-     },
-     "captions": [ ... word-level captions from WhisperX ... ]
-   }
-   ```
+Pass the unchanged `edit_decisions` and complete `asset_manifest` to
+`video_compose`. The tool resolves Workspace paths, stages browser-safe media,
+converts the approved SRT into timed Remotion captions, and emits the MP4,
+render report, final review, SRT and poster. A missing reference is a blocking
+contract error; do not silently generate a replacement or claim it was burned.
 
 ### Step 3: Prepare Render Inputs
 
@@ -226,68 +167,16 @@ Call the `audio_mixer` tool to:
 5. Output the final mixed audio track
 The video_compose tool will mux this with the video.
 
-### Step 5b: Generate Subtitles (Mandatory)
+### Step 5b: Verify Approved Subtitles (Mandatory)
 
-Subtitles are mandatory for all explainer content. Generate them from the narration audio — do NOT skip this step.
-
-**Remotion path (DEFAULT — when using Remotion render):**
-
-1. **Transcribe** the full narration using the `transcriber` tool (whisperx):
-   ```python
-   from tools.analysis.transcriber import Transcriber
-   result = Transcriber().execute({
-       'input_path': 'projects/<project>/assets/audio/narration_full.mp3',
-       'model_size': 'base',
-       'language': 'en',
-       'output_dir': 'projects/<project>/assets/audio'
-   })
-   # result.data contains segments with word-level timestamps
-   ```
-
-2. **Convert to Remotion WordCaption format** (NOT SRT):
-   ```python
-   captions = []
-   for segment in result.data['segments']:
-       for word_info in segment.get('words', []):
-           captions.append({
-               'word': word_info['word'],
-               'startMs': int(word_info['start'] * 1000),
-               'endMs': int(word_info['end'] * 1000),
-           })
-   ```
-
-3. **Add captions to composition props** — they go in the `captions` array alongside `cuts` and `audio`:
-   ```json
-   {
-     "cuts": [...],
-     "audio": {...},
-     "captions": [
-       { "word": "Root", "startMs": 120, "endMs": 340 },
-       { "word": "canals", "startMs": 340, "endMs": 680 }
-     ]
-   }
-   ```
-
-   Remotion's CaptionOverlay renders these as word-by-word highlighted captions with the theme's
-   `captionHighlightColor` and `captionBackgroundColor`. This is superior to FFmpeg SRT burn because
-   it produces animated word-level highlighting synchronized to narration.
-
-**FFmpeg fallback (ONLY when Remotion is unavailable):**
-
-If Remotion is not available, fall back to SRT generation + FFmpeg burn:
-   ```python
-   from tools.subtitle.subtitle_gen import SubtitleGen
-   SubtitleGen().execute({
-       'segments': transcription_data['segments'],
-       'format': 'srt',
-       'output_path': 'projects/<project>/assets/subtitles.srt',
-       'max_words_per_cue': 8,
-       'max_chars_per_line': 42
-   })
-   # Then burn with video_compose operation='burn_subtitles'
-   ```
-
-**The final deliverable MUST have subtitles** — either via Remotion captions or FFmpeg burn.
+Subtitles are mandatory for this pipeline, but they are generated in `assets`,
+not here. Verify that `edit_decisions.subtitles.source` references the approved
+SRT asset. For Remotion, a subtitle file merely existing is not sufficient:
+`video_compose` must report a positive burned-caption count and
+`final_review.checks.subtitle_check.subtitles_present=true`. Keep the same SRT
+as a downloadable sidecar. Use `max_width_percent` and
+`bottom_margin_percent` from the edit decision so the caption box stays inside
+the actual render frame safe area for every aspect ratio.
 
 ### Step 5c: Pre-Render Validation (Mandatory)
 

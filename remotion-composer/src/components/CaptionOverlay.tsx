@@ -24,6 +24,8 @@ interface CaptionOverlayProps extends Record<string, unknown> {
   backgroundColor?: string;
   fontFamily?: string;
   joiner?: string;
+  maxWidthPercent?: number;
+  bottomMarginPercent?: number;
 }
 
 interface CaptionPage {
@@ -54,9 +56,11 @@ const PageRenderer: React.FC<{
   backgroundColor: string;
   fontFamily: string;
   joiner: string;
-}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, joiner }) => {
+  maxWidthPercent: number;
+  bottomMarginPercent: number;
+}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, joiner, maxWidthPercent, bottomMarginPercent }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, height } = useVideoConfig();
 
   const currentMs = page.startMs + (frame / fps) * 1000;
 
@@ -72,7 +76,7 @@ const PageRenderer: React.FC<{
       style={{
         justifyContent: "flex-end",
         alignItems: "center",
-        paddingBottom: 80,
+        paddingBottom: Math.round(height * bottomMarginPercent / 100),
       }}
     >
       <div
@@ -82,7 +86,7 @@ const PageRenderer: React.FC<{
           backgroundColor,
           borderRadius: 12,
           padding: "14px 28px",
-          maxWidth: "80%",
+          maxWidth: `${maxWidthPercent}%`,
           textAlign: "center",
         }}
       >
@@ -128,6 +132,8 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
   backgroundColor = "rgba(15, 23, 42, 0.75)",
   fontFamily = "Space Grotesk, Inter, system-ui, sans-serif",
   joiner = " ",
+  maxWidthPercent = 80,
+  bottomMarginPercent = 7.5,
 }) => {
   const { fps } = useVideoConfig();
   const pages = buildPages(words, wordsPerPage);
@@ -152,6 +158,8 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
               backgroundColor={backgroundColor}
               fontFamily={fontFamily}
               joiner={joiner}
+              maxWidthPercent={maxWidthPercent}
+              bottomMarginPercent={bottomMarginPercent}
             />
           </Sequence>
         );

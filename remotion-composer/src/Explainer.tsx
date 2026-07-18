@@ -291,12 +291,19 @@ interface Overlay {
 }
 
 interface AudioLayer {
+  src?: string;
+  volume?: number;
+}
+
+interface NarrationSegment {
   src: string;
+  start_seconds?: number;
+  end_seconds?: number;
   volume?: number;
 }
 
 interface AudioConfig {
-  narration?: AudioLayer;
+  narration?: AudioLayer & { segments?: NarrationSegment[] };
   music?: AudioLayer & {
     fadeInSeconds?: number;
     fadeOutSeconds?: number;
@@ -314,6 +321,15 @@ export interface ExplainerProps {
   overlays?: Overlay[];
   captions?: WordCaption[];
   captionJoiner?: string;
+  captionStyle?: {
+    wordsPerPage?: number;
+    fontSize?: number;
+    color?: string;
+    highlightColor?: string;
+    backgroundColor?: string;
+    maxWidthPercent?: number;
+    bottomMarginPercent?: number;
+  };
   audio?: AudioConfig;
   render?: {
     width?: number;
@@ -785,7 +801,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
 // ---------------------------------------------------------------------------
 
 export const Explainer: React.FC<ExplainerProps> = (props) => {
-  const { cuts, overlays, captions, captionJoiner, audio } = props;
+  const { cuts, overlays, captions, captionJoiner, captionStyle, audio } = props;
   const { fps, durationInFrames } = useVideoConfig();
 
   // Resolve theme from props — playbook name, theme name, or custom themeConfig
@@ -826,11 +842,14 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
       {captions && captions.length > 0 && (
         <CaptionOverlay
           words={captions}
-          wordsPerPage={6}
-          fontSize={42}
-          highlightColor={theme.captionHighlightColor}
-          backgroundColor={theme.captionBackgroundColor}
+          wordsPerPage={captionStyle?.wordsPerPage ?? 6}
+          fontSize={captionStyle?.fontSize ?? 42}
+          color={captionStyle?.color ?? "#F8FAFC"}
+          highlightColor={captionStyle?.highlightColor ?? theme.captionHighlightColor}
+          backgroundColor={captionStyle?.backgroundColor ?? theme.captionBackgroundColor}
           joiner={captionJoiner ?? " "}
+          maxWidthPercent={captionStyle?.maxWidthPercent ?? 80}
+          bottomMarginPercent={captionStyle?.bottomMarginPercent ?? 7.5}
         />
       )}
 
@@ -838,6 +857,17 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
       {audio?.narration?.src && (
         <Audio src={resolveAsset(audio.narration.src)} volume={audio.narration.volume ?? 1} />
       )}
+      {audio?.narration?.segments?.map((segment, index) => {
+        const from = Math.round((segment.start_seconds ?? 0) * fps);
+        const duration = segment.end_seconds == null
+          ? undefined
+          : Math.max(1, Math.round((segment.end_seconds - (segment.start_seconds ?? 0)) * fps));
+        return (
+          <Sequence key={`narration-${index}`} from={from} durationInFrames={duration}>
+            <Audio src={resolveAsset(segment.src)} volume={segment.volume ?? audio.narration?.volume ?? 1} />
+          </Sequence>
+        );
+      })}
 
       {/* Layer 4: Audio — music with offset, fade in/out, and optional loop */}
       {audio?.music?.src && (

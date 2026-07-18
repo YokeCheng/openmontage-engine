@@ -161,7 +161,21 @@
         "outline_color": { "type": "string" },
         "background": { "type": "string", "description": "Background color with optional alpha (e.g. #00000088)" },
         "position": { "type": "string", "enum": ["top-center", "bottom-center", "center"] },
-        "max_words_per_line": { "type": "integer", "minimum": 1 }
+        "max_words_per_line": { "type": "integer", "minimum": 1 },
+        "max_width_percent": {
+          "type": "number",
+          "minimum": 40,
+          "maximum": 95,
+          "default": 80,
+          "description": "Maximum subtitle box width as a percentage of the rendered frame."
+        },
+        "bottom_margin_percent": {
+          "type": "number",
+          "minimum": 2,
+          "maximum": 20,
+          "default": 7.5,
+          "description": "Bottom safe-area margin as a percentage of frame height."
+        }
       },
       "additionalProperties": false
     },

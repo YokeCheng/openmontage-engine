@@ -72,12 +72,19 @@ Subtitles are mandatory for all explainer content:
     "color": "#FFFFFF",
     "background": "#00000088",
     "position": "bottom-center",
-    "max_words_per_line": 8
+    "max_words_per_line": 6,
+    "max_width_percent": 80,
+    "bottom_margin_percent": 7.5,
+    "source": "subtitle-approved-script"
   }
 }
 ```
 
-**Subtitle timing**: Derive from narration audio timestamps. Each word should highlight as it's spoken (word-by-word style) or display in phrase chunks (phrase style).
+`source` must be the ID of the approved SRT in `asset_manifest`; do not invent
+a path or defer subtitle generation to compose. The engine resolves that ID
+inside the tenant Workspace and converts the SRT timing into Remotion caption
+tokens. `max_width_percent` and `bottom_margin_percent` are frame-relative safe
+area controls, so they remain correct when output resolution changes.
 
 Use the playbook's typography for font choices.
 

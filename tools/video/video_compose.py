@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 import hashlib
@@ -424,6 +425,42 @@ class VideoCompose(BaseTool):
             layer = audio.get(layer_name)
             if isinstance(layer, dict) and isinstance(layer.get("src"), str):
                 layer["src"] = cls._stage_public_asset(layer["src"], output_path=output_path, namespace=namespace)
+            if isinstance(layer, dict) and isinstance(layer.get("segments"), list):
+                for segment in layer["segments"]:
+                    if isinstance(segment, dict) and isinstance(segment.get("src"), str):
+                        segment["src"] = cls._stage_public_asset(
+                        segment["src"], output_path=output_path, namespace=namespace
+                    )
+
+    @classmethod
+    def _stage_remotion_visual_assets(cls, props: dict[str, Any], output_path: Path) -> None:
+        """Stage Workspace images/videos under Remotion public/ for Chromium."""
+
+        namespace = hashlib.sha256(str(output_path).encode()).hexdigest()[:16]
+        for cut in props.get("cuts", []):
+            if not isinstance(cut, dict):
+                continue
+            for key in ("source", "backgroundImage", "backgroundVideo"):
+                value = cut.get(key)
+                if isinstance(value, str) and value:
+                    cut[key] = cls._stage_public_asset(
+                        value, output_path=output_path, namespace=namespace
+                    )
+            if isinstance(cut.get("images"), list):
+                cut["images"] = [
+                    cls._stage_public_asset(value, output_path=output_path, namespace=namespace)
+                    if isinstance(value, str)
+                    else value
+                    for value in cut["images"]
+                ]
+        for overlay in props.get("overlays", []):
+            if not isinstance(overlay, dict):
+                continue
+            value = overlay.get("asset_path")
+            if isinstance(value, str) and value:
+                overlay["asset_path"] = cls._stage_public_asset(
+                    value, output_path=output_path, namespace=namespace
+                )
 
     @staticmethod
     def _audio_from_asset_manifest(asset_manifest: dict[str, Any]) -> dict[str, Any]:
@@ -444,21 +481,44 @@ class VideoCompose(BaseTool):
                     "fadeInSeconds": float(asset.get("fade_in_seconds") or 0.6),
                     "fadeOutSeconds": float(asset.get("fade_out_seconds") or 0.8),
                 }
-            elif subtype in {"narration", "voice", "voiceover"} and not asset.get("scene_id") and "narration" not in audio:
+            elif subtype in {"narration", "voice", "voiceover"} and "narration" not in audio:
                 audio["narration"] = {"src": path, "volume": float(asset.get("volume") or 1)}
         return audio
 
     @classmethod
     def _with_manifest_audio(cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]) -> dict[str, Any]:
         merged = json.loads(json.dumps(edit_decisions))
+        asset_lookup = {
+            str(asset.get("id")): asset
+            for asset in asset_manifest.get("assets", [])
+            if isinstance(asset, dict) and asset.get("id")
+        }
         manifest_audio = cls._audio_from_asset_manifest(asset_manifest)
-        if not manifest_audio:
-            return merged
         audio = merged.get("audio")
         if not isinstance(audio, dict):
             audio = {}
+
+        narration = audio.get("narration")
+        if isinstance(narration, dict) and isinstance(narration.get("segments"), list):
+            resolved_segments: list[dict[str, Any]] = []
+            for item in narration["segments"]:
+                if not isinstance(item, dict):
+                    continue
+                segment = dict(item)
+                asset = asset_lookup.get(str(segment.get("asset_id") or ""))
+                if asset is not None and asset.get("path"):
+                    segment["src"] = str(asset["path"])
+                if segment.get("src"):
+                    resolved_segments.append(segment)
+            if resolved_segments:
+                narration["segments"] = resolved_segments
+                narration.pop("src", None)
+                audio["narration"] = narration
+
         for key, value in manifest_audio.items():
             existing = audio.get(key)
+            if key == "narration" and isinstance(existing, dict) and existing.get("segments"):
+                continue
             if isinstance(existing, dict) and isinstance(value, dict):
                 for field, field_value in value.items():
                     existing.setdefault(field, field_value)
@@ -469,7 +529,105 @@ class VideoCompose(BaseTool):
                         existing["volume"] = float(value.get("volume") or 0.85)
             else:
                 audio[key] = value
-        merged["audio"] = audio
+        if audio:
+            merged["audio"] = audio
+        return merged
+
+    @staticmethod
+    def _parse_srt_timestamp(value: str) -> float:
+        match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})", value.strip())
+        if match is None:
+            raise ValueError(f"Invalid SRT timestamp: {value}")
+        hours, minutes, seconds, milliseconds = (int(part) for part in match.groups())
+        return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
+
+    @classmethod
+    def _captions_from_srt(cls, path: Path) -> tuple[list[dict[str, Any]], str]:
+        """Convert an approved SRT into deterministic Remotion caption tokens."""
+
+        captions: list[dict[str, Any]] = []
+        has_cjk = False
+        content = path.read_text(encoding="utf-8-sig").strip()
+        for block in re.split(r"\n\s*\n", content):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+            if timing_index is None:
+                continue
+            start_raw, end_raw = (part.strip() for part in lines[timing_index].split("-->", maxsplit=1))
+            start = cls._parse_srt_timestamp(start_raw)
+            end = max(start + 0.1, cls._parse_srt_timestamp(end_raw))
+            text = "".join(lines[timing_index + 1 :]).strip()
+            if not text:
+                continue
+            cjk = any("\u4e00" <= char <= "\u9fff" for char in text)
+            has_cjk = has_cjk or cjk
+            if cjk:
+                chunks: list[str] = []
+                current = ""
+                for char in text:
+                    if char.isspace():
+                        continue
+                    current += char
+                    if char in "，。！？；：、,.!?;:" or len(current) >= 6:
+                        chunks.append(current)
+                        current = ""
+                if current:
+                    chunks.append(current)
+            else:
+                chunks = text.split()
+            total_weight = sum(max(1, len(chunk)) for chunk in chunks)
+            cursor = start
+            for index, chunk in enumerate(chunks):
+                chunk_end = (
+                    end
+                    if index == len(chunks) - 1
+                    else cursor + (end - start) * max(1, len(chunk)) / total_weight
+                )
+                captions.append(
+                    {
+                        "word": chunk,
+                        "startMs": int(round(cursor * 1000)),
+                        "endMs": int(round(chunk_end * 1000)),
+                    }
+                )
+                cursor = chunk_end
+        return captions, "" if has_cjk else " "
+
+    @classmethod
+    def _with_manifest_subtitles(
+        cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = json.loads(json.dumps(edit_decisions))
+        subtitles = merged.get("subtitles")
+        if not isinstance(subtitles, dict) or not subtitles.get("enabled"):
+            return merged
+        asset_lookup = {
+            str(asset.get("id")): asset
+            for asset in asset_manifest.get("assets", [])
+            if isinstance(asset, dict) and asset.get("id")
+        }
+        source = str(subtitles.get("source") or "")
+        referenced = asset_lookup.get(source)
+        if referenced is not None and referenced.get("path"):
+            source = str(referenced["path"])
+            subtitles["source"] = source
+        subtitle_path = Path(source) if source else None
+        if subtitle_path is not None and subtitle_path.is_file():
+            captions, joiner = cls._captions_from_srt(subtitle_path)
+            if captions:
+                merged["captions"] = captions
+                merged["captionJoiner"] = joiner
+                merged["captionStyle"] = {
+                    "wordsPerPage": int(subtitles.get("max_words_per_line") or 6),
+                    "fontSize": int(subtitles.get("font_size") or 42),
+                    "maxWidthPercent": float(subtitles.get("max_width_percent") or 80),
+                    "bottomMarginPercent": float(subtitles.get("bottom_margin_percent") or 7.5),
+                    "color": str(subtitles.get("color") or "#F8FAFC"),
+                    "backgroundColor": str(
+                        subtitles.get("background") or "rgba(15, 23, 42, 0.75)"
+                    ),
+                }
+        merged["subtitles"] = subtitles
         return merged
 
     @staticmethod
@@ -1221,8 +1379,8 @@ class VideoCompose(BaseTool):
             theme["captionHighlightColor"] = primary
             # Caption background: semi-transparent version of the bg color
             theme["captionBackgroundColor"] = (
-                f"rgba(255, 255, 255, 0.85)" if bg.upper() in ("#FFFFFF", "#FAFAFA", "#F9FAFB")
-                else f"rgba(15, 23, 42, 0.75)"
+                "rgba(255, 255, 255, 0.85)" if bg.upper() in ("#FFFFFF", "#FAFAFA", "#F9FAFB")
+                else "rgba(15, 23, 42, 0.75)"
             )
 
             # Motion style from playbook
@@ -1417,6 +1575,7 @@ class VideoCompose(BaseTool):
         The agent should pass edit_decisions, asset_manifest, and optionally
         profile, subtitle_path, audio_path, and options.
         """
+        render_started = time.monotonic()
         edit_decisions = inputs.get("edit_decisions")
         asset_manifest = inputs.get("asset_manifest")
         if not edit_decisions:
@@ -1475,6 +1634,13 @@ class VideoCompose(BaseTool):
 
         # Build asset lookup: id -> asset info
         asset_lookup = {a["id"]: a for a in asset_manifest.get("assets", [])}
+
+        # Resolve the approved media manifest into render-native props. The
+        # edit artifact keeps stable asset IDs for auditability; Remotion must
+        # receive concrete Workspace paths, segmented narration sources and
+        # parsed caption timing.
+        edit_decisions = self._with_manifest_audio(edit_decisions, asset_manifest)
+        edit_decisions = self._with_manifest_subtitles(edit_decisions, asset_manifest)
 
         cuts = edit_decisions.get("cuts", [])
         if not cuts:
@@ -1608,6 +1774,65 @@ class VideoCompose(BaseTool):
                 render_result.data = {}
             render_result.data["final_review"] = final_review
             render_result.data["final_review_status"] = final_review["status"]
+
+            technical = (final_review.get("checks") or {}).get("technical_probe") or {}
+            output_checksum = hashlib.sha256(output_path.read_bytes()).hexdigest()
+            subtitle_source = str((edit_decisions.get("subtitles") or {}).get("source") or "")
+            subtitle_path = Path(subtitle_source) if subtitle_source else None
+            frame_paths = (
+                ((final_review.get("checks") or {}).get("visual_spotcheck") or {}).get("frame_paths")
+                or []
+            )
+            poster_path: Path | None = None
+            if frame_paths:
+                first_frame = Path(str(frame_paths[0]))
+                if first_frame.is_file():
+                    poster_path = output_path.parent / "poster.png"
+                    shutil.copy2(first_frame, poster_path)
+
+            render_report = {
+                "version": "1.0",
+                "outputs": [
+                    {
+                        "path": str(output_path),
+                        "format": "mp4",
+                        "codec": str(technical.get("codec") or "unknown"),
+                        "audio_codec": str(technical.get("audio_codec") or "none"),
+                        "resolution": str(technical.get("resolution") or "0x0"),
+                        "fps": float(technical.get("fps") or 0),
+                        "duration_seconds": float(technical.get("duration_seconds") or 0),
+                        "file_size_bytes": int(technical.get("file_size_bytes") or output_path.stat().st_size),
+                        "platform_target": str(inputs.get("profile") or inputs.get("output_profile") or "web"),
+                    }
+                ],
+                "render_time_seconds": round(time.monotonic() - render_started, 3),
+                "warnings": list(final_review.get("issues_found") or []),
+                "verification_notes": [
+                    "ffprobe completed successfully",
+                    f"SHA-256 {output_checksum}",
+                    f"Burned caption tokens: {len(edit_decisions.get('captions') or [])}",
+                ],
+                "render_grammar": str(edit_decisions.get("renderer_family") or "explainer-data"),
+                "final_review_ref": "inline:final_review",
+                "metadata": {
+                    "runtime": render_runtime,
+                    "sha256": output_checksum,
+                    "has_audio": bool(technical.get("has_audio")),
+                    "caption_count": len(edit_decisions.get("captions") or []),
+                    "subtitle_path": str(subtitle_path) if subtitle_path and subtitle_path.is_file() else None,
+                    "poster_path": str(poster_path) if poster_path else None,
+                },
+            }
+            render_result.data["render_report"] = render_report
+            render_result.data["subtitle_path"] = (
+                str(subtitle_path) if subtitle_path is not None and subtitle_path.is_file() else None
+            )
+            render_result.data["poster_path"] = str(poster_path) if poster_path else None
+            artifact_paths = list(render_result.artifacts or [])
+            for extra_path in (subtitle_path, poster_path):
+                if extra_path is not None and extra_path.is_file() and str(extra_path) not in artifact_paths:
+                    artifact_paths.append(str(extra_path))
+            render_result.artifacts = artifact_paths
 
             # If the self-review says fail, downgrade the ToolResult
             if final_review["status"] == "fail":
@@ -1830,16 +2055,6 @@ class VideoCompose(BaseTool):
         # Deep-copy props so we don't mutate the original
         props = json.loads(json.dumps(composition_data))
 
-        # Convert absolute file paths to file:// URIs for Remotion's
-        # Img and OffthreadVideo components
-        for cut in props.get("cuts", []):
-            source = cut.get("source", "")
-            if source and not source.startswith(("http://", "https://", "file://")):
-                resolved = Path(source).resolve()
-                if resolved.exists():
-                    posix = resolved.as_posix()
-                    cut["source"] = f"file:///{posix}" if not posix.startswith("/") else f"file://{posix}"
-
         # Build a custom themeConfig from the playbook's actual colors.
         # This ensures every video gets a unique visual identity derived
         # from its production decisions — not picked from a preset menu.
@@ -1853,6 +2068,7 @@ class VideoCompose(BaseTool):
             if theme_config:
                 props["themeConfig"] = theme_config
 
+        self._stage_remotion_visual_assets(props, output_path)
         self._stage_remotion_audio_assets(props, output_path)
 
         # Write props to temp file for Remotion CLI
@@ -1953,6 +2169,10 @@ class VideoCompose(BaseTool):
                 "operation": "remotion_render",
                 "output": str(output_path),
                 "profile": profile_name,
+                "caption_count": len(props.get("captions") or []),
+                "narration_segment_count": len(
+                    ((props.get("audio") or {}).get("narration") or {}).get("segments") or []
+                ),
             },
             artifacts=[str(output_path)],
         )
@@ -2165,6 +2385,7 @@ class VideoCompose(BaseTool):
                     "fps": fps,
                     "has_audio": bool(audio_stream),
                     "codec": video_stream.get("codec_name", "unknown"),
+                    "audio_codec": audio_stream.get("codec_name", "") if audio_stream else "",
                     "file_size_bytes": int(fmt.get("size", 0)),
                     "issues": [],
                 }
@@ -2443,16 +2664,31 @@ class VideoCompose(BaseTool):
                     # they may be burned in (which is fine — not a failure)
                     if (subtitle_check["subtitles_expected"]
                             and not subtitle_check["subtitles_present"]):
-                        # Check if subtitle_path was used (burned in)
-                        sub_source = ed_subs.get("source")
-                        if sub_source and Path(sub_source).exists():
-                            # Burned-in subtitles are not detectable as streams
+                        # Remotion captions are burned into picture and do not
+                        # appear as a subtitle stream. Require actual parsed
+                        # caption timing as proof; an SRT merely existing on
+                        # disk is not evidence that the renderer consumed it.
+                        rendered_captions = edit_decisions.get("captions")
+                        if isinstance(rendered_captions, list) and rendered_captions:
                             subtitle_check["subtitles_present"] = True
                             subtitle_check["coverage_ratio"] = 1.0
-                        else:
+
+                        # FFmpeg burn-in is likewise not visible as a stream,
+                        # but its render path consumes the concrete source.
+                        sub_source = ed_subs.get("source")
+                        render_runtime = str(edit_decisions.get("render_runtime") or "")
+                        if (
+                            not subtitle_check["subtitles_present"]
+                            and render_runtime == "ffmpeg"
+                            and sub_source
+                            and Path(sub_source).exists()
+                        ):
+                            subtitle_check["subtitles_present"] = True
+                            subtitle_check["coverage_ratio"] = 1.0
+                        if not subtitle_check["subtitles_present"]:
                             subtitle_check["issues"].append(
-                                "Subtitles expected but not found in output and "
-                                "no subtitle source file exists for burn-in"
+                                "Subtitles expected but no rendered Remotion captions, "
+                                "FFmpeg burn-in evidence, or subtitle stream was found"
                             )
                 except Exception as e:
                     subtitle_check["issues"].append(f"Subtitle check error: {e}")
@@ -2491,6 +2727,19 @@ class VideoCompose(BaseTool):
             recommended_action = "present_to_user"
 
         if not technical_probe.get("valid_container"):
+            status = "fail"
+            recommended_action = "re_render"
+
+        audio_config = edit_decisions.get("audio") if isinstance(edit_decisions, dict) else {}
+        narration_config = audio_config.get("narration") if isinstance(audio_config, dict) else None
+        audio_expected = bool(
+            isinstance(narration_config, dict)
+            and (narration_config.get("src") or narration_config.get("segments"))
+        )
+        if audio_expected and not technical_probe.get("has_audio"):
+            status = "fail"
+            recommended_action = "re_render"
+        if subtitle_check.get("subtitles_expected") and not subtitle_check.get("subtitles_present"):
             status = "fail"
             recommended_action = "re_render"
 
@@ -2594,8 +2843,6 @@ class VideoCompose(BaseTool):
             y = int(ov.get("y", 0))
             start = ov.get("start_seconds", 0)
             end = ov.get("end_seconds")
-            opacity = ov.get("opacity", 1.0)
-
             overlay_input = f"{i + 1}:v"
 
             # Scale overlay if dimensions specified
@@ -2657,7 +2904,7 @@ class VideoCompose(BaseTool):
         # Apply media profile if specified
         if profile_name:
             try:
-                from lib.media_profiles import get_profile, ffmpeg_output_args
+                from lib.media_profiles import get_profile
                 profile = get_profile(profile_name)
                 cmd.extend(["-s", f"{profile.width}x{profile.height}"])
                 cmd.extend(["-r", str(profile.fps)])

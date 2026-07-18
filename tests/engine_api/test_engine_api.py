@@ -1012,6 +1012,68 @@ def test_capability_gateway_injects_workspace_local_video_compose_output_path(
     assert execution["artifacts"][0]["path"] == "renders/final.mp4"
 
 
+def test_capability_gateway_resolves_manifest_paths_inside_workspace(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = create_workspace(client, key="workspace-video-compose-manifest-paths")
+    workspace_id = workspace["workspace_id"]
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    video_compose = registry.get("video_compose")
+    assert video_compose is not None
+    seen_inputs: dict[str, object] = {}
+
+    def fake_execute(inputs: dict) -> ToolResult:
+        seen_inputs.update(inputs)
+        output = Path(str(inputs["output_path"]))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"workspace-local-video")
+        return ToolResult(success=True, data={"output_path": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(video_compose, "execute", fake_execute)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="video-compose-manifest-paths"),
+        json={
+            "stage": "compose",
+            "tool_name": "video_compose",
+            "inputs": {
+                "operation": "render",
+                "edit_decisions": {
+                    "render_runtime": "remotion",
+                    "renderer_family": "explainer-data",
+                    "cuts": [{"id": "cut-1", "source": "image-1", "in_seconds": 0, "out_seconds": 1}],
+                },
+                "asset_manifest": {
+                    "assets": [
+                        {"id": "image-1", "type": "image", "path": "assets/images/scene.png"},
+                        {"id": "subtitle-1", "type": "subtitle", "path": "assets/subtitles/script.srt"},
+                    ]
+                },
+            },
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+    assert execution["status"] == "succeeded"
+    assets = seen_inputs["asset_manifest"]["assets"]  # type: ignore[index]
+    for asset in assets:
+        path = Path(asset["path"])
+        assert path.is_absolute()
+        assert workspace_id in path.parts
+
+
 def test_capability_gateway_materializes_script_section_subtitles_for_video_compose(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

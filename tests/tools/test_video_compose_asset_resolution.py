@@ -147,3 +147,150 @@ def test_asset_manifest_music_completes_existing_asset_id_audio_layer():
     assert merged["audio"]["music"]["src"] == "music_library/councilforge-local-ambient-bed.mp3"
     assert merged["audio"]["music"]["loop"] is True
     assert merged["audio"]["music"]["volume"] == 0.85
+
+
+def test_manifest_ids_resolve_to_segmented_narration_and_chinese_captions(tmp_path):
+    narration = tmp_path / "narration.wav"
+    narration.write_bytes(b"RIFF-test")
+    subtitles = tmp_path / "approved.srt"
+    subtitles.write_text(
+        "1\n00:00:00,000 --> 00:00:03,000\n平台负责决策，引擎负责执行。\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "assets": [
+            {
+                "id": "narration-approved",
+                "type": "audio",
+                "subtype": "narration",
+                "path": str(narration),
+                "scene_id": "scene-01",
+            },
+            {
+                "id": "subtitle-approved",
+                "type": "subtitle",
+                "path": str(subtitles),
+            },
+        ]
+    }
+    decisions = {
+        "audio": {
+            "narration": {
+                "segments": [
+                    {
+                        "asset_id": "narration-approved",
+                        "start_seconds": 0,
+                        "end_seconds": 3,
+                    }
+                ]
+            }
+        },
+        "subtitles": {
+            "enabled": True,
+            "source": "subtitle-approved",
+            "max_words_per_line": 3,
+            "max_width_percent": 76,
+            "bottom_margin_percent": 8,
+        },
+    }
+
+    merged = VideoCompose._with_manifest_audio(decisions, manifest)
+    merged = VideoCompose._with_manifest_subtitles(merged, manifest)
+
+    assert merged["audio"]["narration"]["segments"][0]["src"] == str(narration)
+    assert merged["audio"]["narration"].get("src") is None
+    assert merged["subtitles"]["source"] == str(subtitles)
+    assert merged["captionJoiner"] == ""
+    assert "".join(item["word"] for item in merged["captions"]) == "平台负责决策，引擎负责执行。"
+    assert merged["captionStyle"] == {
+        "wordsPerPage": 3,
+        "fontSize": 42,
+        "maxWidthPercent": 76.0,
+        "bottomMarginPercent": 8.0,
+        "color": "#F8FAFC",
+        "backgroundColor": "rgba(15, 23, 42, 0.75)",
+    }
+
+
+def test_render_returns_probe_backed_report_srt_and_poster(tmp_path, monkeypatch):
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image")
+    narration = tmp_path / "narration.wav"
+    narration.write_bytes(b"audio")
+    subtitles = tmp_path / "approved.srt"
+    subtitles.write_text(
+        "1\n00:00:00,000 --> 00:00:03,000\n真实字幕。\n",
+        encoding="utf-8",
+    )
+    frame = tmp_path / "review.png"
+    frame.write_bytes(b"frame")
+
+    def fake_render(self, inputs):
+        output = Path(inputs["output_path"])
+        output.write_bytes(b"real-enough-mp4")
+        return ToolResult(success=True, data={"output": str(output)}, artifacts=[str(output)])
+
+    monkeypatch.setattr(VideoCompose, "_remotion_render", fake_render)
+    monkeypatch.setattr(VideoCompose, "_pre_compose_validation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        VideoCompose,
+        "_run_final_review",
+        lambda *args, **kwargs: {
+            "version": "1.0",
+            "output_path": str(tmp_path / "final.mp4"),
+            "status": "pass",
+            "checks": {
+                "technical_probe": {
+                    "valid_container": True,
+                    "duration_seconds": 3.0,
+                    "resolution": "1920x1080",
+                    "fps": 30.0,
+                    "has_audio": True,
+                    "codec": "h264",
+                    "audio_codec": "aac",
+                    "file_size_bytes": 15,
+                    "issues": [],
+                },
+                "visual_spotcheck": {"frame_paths": [str(frame)]},
+                "subtitle_check": {"subtitles_expected": True, "subtitles_present": True},
+            },
+            "issues_found": [],
+            "recommended_action": "present_to_user",
+        },
+    )
+
+    result = VideoCompose().execute(
+        {
+            "operation": "render",
+            "output_path": str(tmp_path / "final.mp4"),
+            "asset_manifest": {
+                "assets": [
+                    {"id": "image-1", "type": "image", "path": str(image)},
+                    {
+                        "id": "narration-1",
+                        "type": "audio",
+                        "subtype": "narration",
+                        "path": str(narration),
+                    },
+                    {"id": "subtitle-1", "type": "subtitle", "path": str(subtitles)},
+                ]
+            },
+            "edit_decisions": {
+                "render_runtime": "remotion",
+                "renderer_family": "explainer-data",
+                "cuts": [{"id": "cut-1", "source": "image-1", "in_seconds": 0, "out_seconds": 3}],
+                "audio": {"narration": {"segments": [{"asset_id": "narration-1", "start_seconds": 0}]}},
+                "subtitles": {"enabled": True, "source": "subtitle-1"},
+            },
+        }
+    )
+
+    assert result.success
+    report = result.data["render_report"]
+    assert report["outputs"][0]["codec"] == "h264"
+    assert report["outputs"][0]["audio_codec"] == "aac"
+    assert report["metadata"]["has_audio"] is True
+    assert report["metadata"]["caption_count"] > 0
+    assert Path(result.data["poster_path"]).is_file()
+    assert str(subtitles) in result.artifacts
+    assert result.data["poster_path"] in result.artifacts

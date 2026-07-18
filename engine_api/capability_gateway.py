@@ -507,7 +507,7 @@ class CapabilityGateway:
                 if _looks_like_path(key):
                     return [self._resolve_path(workspace_dir, item) if isinstance(item, str) else normalize(key, item) for item in value]
                 return [normalize(key, item) for item in value]
-            if _looks_like_path(key) and isinstance(value, str):
+            if (key == "path" or _looks_like_path(key)) and isinstance(value, str):
                 return self._resolve_path(workspace_dir, value)
             return value
 

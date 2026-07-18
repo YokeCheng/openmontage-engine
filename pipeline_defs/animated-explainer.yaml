@@ -321,9 +321,9 @@ stages:
       - final_review
     required_tools:
       - video_compose
-      - audio_mixer
     optional_tools:
       - video_stitch
+      - audio_mixer
     tools_available:
       - video_compose
       - hyperframes_compose
@@ -340,6 +340,9 @@ stages:
     success_criteria:
       - Schema-valid render_report with output paths
       - Output file exists and passes ffprobe validation
+      - Final MP4 contains both H.264-compatible video and the approved narration audio
+      - Approved-script subtitles are visibly burned into the Remotion render and the SRT remains deliverable
+      - Poster frame, checksum, duration, resolution, FPS and codecs are recorded
 
   - name: publish
     skill: pipelines/explainer/publish-director
