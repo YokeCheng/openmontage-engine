@@ -11,9 +11,9 @@ default_checkpoint_policy: guided
 
 platform_contract:
   version: "1.0"
-  readiness: requires_input_adapter
-  intake_adapter: long-form-source-brief-v1
-  status_reason: "requires_source_materials: long_form_video_or_audio"
+  readiness: ready
+  intake_adapter: councilforge-source-materials-v1
+  status_reason: "Ready when the CouncilForge brief includes uploaded long-form video or audio source material."
   input_modes:
     - source_materials
     - uploaded_video

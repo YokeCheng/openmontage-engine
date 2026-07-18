@@ -12,9 +12,9 @@ default_checkpoint_policy: guided
 
 platform_contract:
   version: "1.0"
-  readiness: requires_input_adapter
-  intake_adapter: podcast-source-brief-v1
-  status_reason: "requires_source_materials: podcast_audio_or_video"
+  readiness: ready
+  intake_adapter: councilforge-source-materials-v1
+  status_reason: "Ready when the CouncilForge brief includes uploaded podcast audio or video source material."
   input_modes:
     - source_materials
     - uploaded_audio

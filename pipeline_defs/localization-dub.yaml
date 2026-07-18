@@ -10,9 +10,9 @@ default_checkpoint_policy: guided
 
 platform_contract:
   version: "1.0"
-  readiness: requires_input_adapter
-  intake_adapter: localization-source-brief-v1
-  status_reason: "requires_source_materials: source_video_and_target_languages"
+  readiness: ready
+  intake_adapter: councilforge-source-materials-v1
+  status_reason: "Ready when the CouncilForge brief includes uploaded source video and target language materials."
   input_modes:
     - source_materials
     - uploaded_video
