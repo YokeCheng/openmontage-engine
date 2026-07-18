@@ -25,9 +25,21 @@
           "seed": { "type": "integer", "description": "Seed if applicable" },
           "model": { "type": "string", "description": "Model used for generation" },
           "cost_usd": { "type": "number", "minimum": 0 },
+          "media_type": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "checksum": {
+            "type": "object",
+            "required": ["algorithm", "value"],
+            "properties": {
+              "algorithm": { "type": "string", "const": "sha256" },
+              "value": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+            },
+            "additionalProperties": false
+          },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "resolution": { "type": "string" },
           "format": { "type": "string" },
+          "metadata": { "type": "object" },
           "quality_score": { "type": "number", "minimum": 0, "maximum": 1 },
           "subtype": { "type": "string", "description": "Sub-classification (e.g. 'background', 'stock', 'generated')" },
           "generation_summary": { "type": "string", "description": "Brief summary of how the asset was generated or sourced" },

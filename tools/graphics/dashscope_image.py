@@ -178,8 +178,7 @@ class DashscopeImage(BaseTool):
                 count=len(image_urls),
             )
             for path, url in zip(output_paths, image_urls):
-                download = requests.get(url, timeout=120)
-                download.raise_for_status()
+                download = self._download_with_retry(url)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(download.content)
 
@@ -187,9 +186,12 @@ class DashscopeImage(BaseTool):
             n_generated = len(image_urls)
 
         except Exception as e:
+            error_code, retryable = self._classify_error(e)
             return ToolResult(
                 success=False,
                 error=f"DashScope image generation failed: {self._safe_error(e)}",
+                error_code=error_code,
+                retryable=retryable,
             )
 
         return ToolResult(
@@ -265,6 +267,47 @@ class DashscopeImage(BaseTool):
             },
             "parameters": parameters,
         }
+
+    @staticmethod
+    def _download_with_retry(url: str):
+        """Retry only the temporary-file download, never the paid generation call."""
+
+        import requests
+
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = requests.get(url, timeout=120)
+                response.raise_for_status()
+                return response
+            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                transient = not isinstance(exc, requests.HTTPError) or status == 429 or (
+                    isinstance(status, int) and status >= 500
+                )
+                if transient and attempt < 2:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                break
+        raise RuntimeError("temporary image download failed after generation") from last_error
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> tuple[str, bool]:
+        import requests
+
+        if isinstance(exc, requests.Timeout):
+            return "PROVIDER_TIMEOUT", True
+        if isinstance(exc, requests.ConnectionError):
+            return "PROVIDER_CONNECTION_ERROR", True
+        if isinstance(exc, requests.HTTPError):
+            status = getattr(exc.response, "status_code", None)
+            if status == 429:
+                return "PROVIDER_RATE_LIMITED", True
+            if status in {408, 425} or (isinstance(status, int) and status >= 500):
+                return "PROVIDER_TRANSIENT_ERROR", True
+            return "PROVIDER_REQUEST_REJECTED", False
+        return "PROVIDER_RESPONSE_INVALID", False
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

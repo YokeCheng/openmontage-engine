@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from engine_api.app import create_app
 from engine_api.renderer import MediaActionRequired, _materialize_media, _render_contract
 from engine_api.store import EngineStore, new_id, utc_now
-from tools.base_tool import ToolResult
+from tools.base_tool import RetryPolicy, ToolResult
 
 
 def manifest(title: str = "CouncilForge") -> dict:
@@ -608,7 +608,12 @@ def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_sk
     assert payload["stage"]["name"] == "assets"
     assert payload["workspace_metadata"]["source_materials"][0]["platform_asset_id"] == "asset_1"
     assert "asset" in payload["instruction"].lower()
-    assert {tool["name"] for tool in payload["tools"]} >= {"diagram_gen", "image_selector", "tts_selector"}
+    assert {tool["name"] for tool in payload["tools"]} >= {
+        "diagram_gen",
+        "image_selector",
+        "subtitle_gen",
+        "tts_selector",
+    }
     assert payload["artifact_schemas"]["asset_manifest"]["title"]
 
 
@@ -811,6 +816,72 @@ def test_capability_gateway_redacts_provider_errors_from_execution_events(
     assert failed["platform_job_id"] == "job-redacted-error"
     assert failed["stage_attempt"] == 3
     assert failed["data"]["error_code"] == "TOOL_EXCEPTION"
+
+
+def test_capability_gateway_retries_retryable_tool_results_and_records_attempts(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = create_workspace(client, key="workspace-tool-retry")
+    workspace_id = workspace["workspace_id"]
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    diagram = registry.get("diagram_gen")
+    assert diagram is not None
+    monkeypatch.setattr(
+        diagram,
+        "retry_policy",
+        RetryPolicy(max_retries=2, backoff_seconds=0),
+    )
+    calls: dict[str, int] = {}
+
+    def retry_then_succeed(inputs: dict) -> ToolResult:
+        output_name = str(inputs.get("output_path") or "")
+        calls[output_name] = calls.get(output_name, 0) + 1
+        if output_name.endswith("retry.png") and calls[output_name] < 3:
+            return ToolResult(
+                success=False,
+                error="provider rate limited",
+                error_code="PROVIDER_RATE_LIMITED",
+                retryable=True,
+            )
+        output = Path(inputs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"retry-success")
+        return ToolResult(success=True, artifacts=[str(output)])
+
+    monkeypatch.setattr(diagram, "execute", retry_then_succeed)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="tool-retry"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "inputs": {"output_path": "assets/images/retry.png"},
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.02)
+
+    assert execution["status"] == "succeeded"
+    assert execution["attempt_count"] == 3, calls
+    assert execution["result"]["attempt_count"] == 3
+    assert len(execution["retry_history"]) == 2
+    events = client.get(
+        f"/v1/workspaces/{workspace_id}/events",
+        headers={"X-Tenant-ID": "tenant-a"},
+    ).json()["events"]
+    assert [event["type"] for event in events].count("execution.retrying") == 2
 
 
 def test_capability_gateway_injects_workspace_local_remotion_paths(

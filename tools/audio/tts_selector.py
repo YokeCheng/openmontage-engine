@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolTier, ToolStatus
+from tools.base_tool import BaseTool, RetryPolicy, ToolResult, ToolRuntime, ToolStability, ToolTier, ToolStatus
 
 
 class TTSSelector(BaseTool):
@@ -35,6 +35,7 @@ class TTSSelector(BaseTool):
         "preflight tool selection",
         "user-facing recommendation flows",
     ]
+    retry_policy = RetryPolicy(max_retries=2, backoff_seconds=1.0, retryable_errors=["rate_limit", "timeout", "connection"])
 
     input_schema = {
         "type": "object",
@@ -45,6 +46,16 @@ class TTSSelector(BaseTool):
                 "type": "string",
                 "description": "Provider-specific voice ID. Passed through to the selected TTS provider.",
             },
+            "voice": {
+                "type": "string",
+                "description": "Provider-native voice name, for example Cherry.",
+            },
+            "language_type": {
+                "type": "string",
+                "enum": ["Auto", "Chinese", "English", "German", "Italian", "Portuguese", "Spanish", "Japanese", "Korean", "French", "Russian"],
+                "description": "Provider-native narration language hint.",
+            },
+            "model": {"type": "string", "description": "Provider-native TTS model ID."},
             "voice_language": {
                 "type": "string",
                 "enum": ["zh", "en"],
@@ -188,7 +199,19 @@ class TTSSelector(BaseTool):
         if tool is None:
             return ToolResult(success=False, error="No TTS provider available.")
 
-        result = tool.execute(inputs)
+        adapted = dict(inputs)
+        props = tool.input_schema.get("properties", {}) if hasattr(tool, "input_schema") else {}
+        if "voice" in props and not adapted.get("voice") and adapted.get("voice_id"):
+            adapted["voice"] = adapted["voice_id"]
+        if "language_type" in props and not adapted.get("language_type"):
+            adapted["language_type"] = {"zh": "Chinese", "en": "English"}.get(str(adapted.get("voice_language") or "").lower(), "Auto")
+        for selector_key in ("preferred_provider", "allowed_providers", "operation"):
+            adapted.pop(selector_key, None)
+        for key in list(adapted):
+            if key not in props:
+                adapted.pop(key, None)
+
+        result = tool.execute(adapted)
         if result.success:
             result.data.setdefault("selected_tool", tool.name)
             result.data["selected_provider"] = tool.provider

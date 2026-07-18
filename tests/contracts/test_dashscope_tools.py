@@ -248,6 +248,17 @@ class TestDashscopeImageSpecific:
         assert "secret-key-12345" not in redacted
         assert "[redacted]" in redacted
 
+    def test_rate_limit_is_retryable(self):
+        import requests
+
+        response = requests.Response()
+        response.status_code = 429
+        error = requests.HTTPError(response=response)
+        assert DashscopeImage._classify_error(error) == (
+            "PROVIDER_RATE_LIMITED",
+            True,
+        )
+
 
 # ------------------------------------------------------------------
 # PR review regressions: multi-image download + idempotency keys
@@ -547,6 +558,7 @@ class TestDashscopeTtsSpecific:
         })
         assert payload["input"]["instructions"] == "speak softly"
         assert payload["input"]["optimize_instructions"] is True
+        assert payload["model"] == "qwen3-tts-instruct-flash"
 
     def test_fallback_includes_piper(self):
         """Piper is the free offline fallback — must be in fallback list."""
@@ -560,6 +572,17 @@ class TestDashscopeTtsSpecific:
         )
         assert "secret-key-12345" not in redacted
         assert "[redacted]" in redacted
+
+    def test_client_error_is_not_retryable(self):
+        import requests
+
+        response = requests.Response()
+        response.status_code = 400
+        error = requests.HTTPError(response=response)
+        assert DashscopeTTS._classify_error(error) == (
+            "PROVIDER_REQUEST_REJECTED",
+            False,
+        )
 
 
 # ------------------------------------------------------------------
@@ -700,9 +723,11 @@ class TestDashscopeRegistryDiscovery:
         # Selector discovers providers by capability="image_generation"
         # dashscope_image has that capability, so it should be routable
         assert DashscopeImage().capability == "image_generation"
+        assert "dashscope_image" in selector.fallback_tools
 
     def test_tts_selector_finds_dashscope(self):
         """tts_selector should auto-discover dashscope_tts by capability."""
         from tools.audio.tts_selector import TTSSelector
         selector = TTSSelector()
         assert DashscopeTTS().capability == "tts"
+        assert "dashscope_tts" in selector.fallback_tools

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
+from tools.base_tool import BaseTool, RetryPolicy, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
 
 
 class ImageSelector(BaseTool):
@@ -36,6 +36,7 @@ class ImageSelector(BaseTool):
         "switching between generated and stock images",
         "automatic fallback when preferred provider is unavailable",
     ]
+    retry_policy = RetryPolicy(max_retries=2, backoff_seconds=1.0, retryable_errors=["rate_limit", "timeout", "connection"])
 
     input_schema = {
         "type": "object",
@@ -61,6 +62,11 @@ class ImageSelector(BaseTool):
                 "type": "string",
                 "description": "Resolution tier for providers that support named resolutions.",
             },
+            "size": {
+                "type": "string",
+                "description": "Provider-native image size such as 2688*1536.",
+            },
+            "model": {"type": "string", "description": "Provider-native model ID."},
             "api_family": {
                 "type": "string",
                 "description": "Provider-specific API family hint passed through when supported.",
@@ -242,6 +248,15 @@ class ImageSelector(BaseTool):
             props = tool.input_schema.get("properties", {})
             if "query" in props and "query" not in adapted:
                 adapted["query"] = adapted.get("prompt", "")
+            if tool.provider == "dashscope" and "size" in props and not adapted.get("size"):
+                model = str(adapted.get("model") or "qwen-image-2.0-pro")
+                aspect_ratio = str(adapted.get("aspect_ratio") or "")
+                qwen2_sizes = {"16:9": "2688*1536", "9:16": "1536*2688", "1:1": "2048*2048"}
+                legacy_sizes = {"16:9": "1664*928", "9:16": "928*1664", "1:1": "1328*1328"}
+                if adapted.get("width") and adapted.get("height"):
+                    adapted["size"] = f"{int(adapted['width'])}*{int(adapted['height'])}"
+                elif aspect_ratio:
+                    adapted["size"] = (qwen2_sizes if model.startswith("qwen-image-2.0") else legacy_sizes).get(aspect_ratio)
 
         # Strip selector-only keys that downstream tools don't understand
         adapted.pop("preferred_provider", None)
@@ -259,6 +274,8 @@ class ImageSelector(BaseTool):
                 "n",
                 "aspect_ratio",
                 "resolution",
+                "size",
+                "model",
                 "generation_mode",
                 "image_url",
                 "image_path",

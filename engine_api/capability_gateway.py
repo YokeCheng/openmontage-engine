@@ -116,6 +116,9 @@ def _redact_sensitive_text(value: str) -> str:
     for key, secret in os.environ.items():
         if _is_sensitive_result_key(key) and secret and len(secret) >= 6:
             redacted = redacted.replace(secret, "[redacted]")
+    for match in re.findall(r"https?://[^\s'\"<>]+", redacted):
+        if _is_signed_url(match.rstrip(".,);]")):
+            redacted = redacted.replace(match, "[redacted-signed-url]")
     return redacted[:2000]
 
 
@@ -452,6 +455,7 @@ class CapabilityGateway:
     @staticmethod
     def _tool_info(tool: Any) -> dict[str, Any]:
         info = tool.get_info()
+        retry_policy = getattr(tool, "retry_policy", None)
         return {
             "name": tool.name,
             "version": tool.version,
@@ -468,6 +472,11 @@ class CapabilityGateway:
             "install_instructions": info.get("install_instructions", ""),
             "dependencies": info.get("dependencies", []),
             "estimated_runtime_seconds": None,
+            "retry_policy": {
+                "max_retries": int(getattr(retry_policy, "max_retries", 0) or 0),
+                "backoff_seconds": float(getattr(retry_policy, "backoff_seconds", 0) or 0),
+                "retryable_errors": list(getattr(retry_policy, "retryable_errors", []) or []),
+            },
         }
 
     def tool_catalog(self) -> list[dict[str, Any]]:
@@ -737,6 +746,8 @@ class CapabilityGateway:
                 "result": None,
                 "error": None,
                 "artifacts": [],
+                "attempt_count": 0,
+                "retry_history": [],
                 "created_at": now,
                 "started_at": None,
                 "finished_at": None,
@@ -836,7 +847,78 @@ class CapabilityGateway:
             tool = registry.get(tool_name)
             if tool is None:
                 raise RuntimeError("Tool disappeared from the registry")
-            result = tool.execute(inputs)
+            retry_policy = getattr(tool, "retry_policy", None)
+            max_retries = max(0, int(getattr(retry_policy, "max_retries", 0) or 0))
+            backoff_seconds = max(0.0, float(getattr(retry_policy, "backoff_seconds", 0) or 0))
+            result = None
+            attempt_count = 0
+            while True:
+                current = self.get_execution(workspace_id, tenant_id, execution_id)
+                if current.get("status") == "cancel_requested":
+                    current["status"] = "cancelled"
+                    current["finished_at"] = utc_now()
+                    self._save_execution(current)
+                    self._append_event(
+                        workspace_id,
+                        tenant_id,
+                        "execution.cancelled",
+                        {
+                            **context,
+                            "attempt_count": attempt_count,
+                            "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+                            "cost_usd": 0.0,
+                        },
+                    )
+                    return
+                attempt_count += 1
+                result = tool.execute(inputs)
+                current = self.get_execution(workspace_id, tenant_id, execution_id)
+                current["attempt_count"] = attempt_count
+                if current.get("status") == "cancel_requested":
+                    current["status"] = "cancelled"
+                    current["finished_at"] = utc_now()
+                    self._save_execution(current)
+                    cancelled = {
+                        **context,
+                        "attempt_count": attempt_count,
+                        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+                        "cost_usd": 0.0,
+                    }
+                    self._append_event(workspace_id, tenant_id, "execution.cancelled", cancelled)
+                    logger.info(
+                        "openmontage_tool_execution %s",
+                        json.dumps({**cancelled, "status": "cancelled"}, sort_keys=True),
+                    )
+                    return
+                if result.success or not bool(getattr(result, "retryable", False)) or attempt_count > max_retries:
+                    break
+
+                delay = min(8.0, backoff_seconds * (2 ** (attempt_count - 1)))
+                retry_entry = {
+                    "attempt": attempt_count,
+                    "next_attempt": attempt_count + 1,
+                    "error_code": str(getattr(result, "error_code", None) or "TOOL_FAILED"),
+                    "message": _redact_sensitive_text(result.error or "Tool execution failed"),
+                    "delay_seconds": delay,
+                    "occurred_at": utc_now(),
+                }
+                current.setdefault("retry_history", []).append(retry_entry)
+                self._save_execution(current)
+                self._append_event(
+                    workspace_id,
+                    tenant_id,
+                    "execution.retrying",
+                    {**context, **retry_entry},
+                )
+                if delay:
+                    deadline = time.monotonic() + delay
+                    while time.monotonic() < deadline:
+                        latest = self.get_execution(workspace_id, tenant_id, execution_id)
+                        if latest.get("status") == "cancel_requested":
+                            break
+                        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+            assert result is not None
             current = self.get_execution(workspace_id, tenant_id, execution_id)
             if current.get("status") == "cancel_requested":
                 current["status"] = "cancelled"
@@ -864,6 +946,7 @@ class CapabilityGateway:
                 for path in self._result_artifact_paths(workspace_id, result)
             ]
             current["status"] = "succeeded" if result.success else "failed"
+            current["attempt_count"] = attempt_count
             current["result"] = {
                 "success": result.success,
                 "data": _sanitize_persisted_result(jsonable_encoder(result.data)),
@@ -871,13 +954,14 @@ class CapabilityGateway:
                 "duration_seconds": float(result.duration_seconds or 0),
                 "seed": result.seed,
                 "model": result.model,
+                "attempt_count": attempt_count,
             }
             current["artifacts"] = artifacts
             elapsed = max(0.0, time.monotonic() - started_monotonic)
             current["error"] = None if result.success else {
-                "code": "TOOL_FAILED",
+                "code": str(result.error_code or "TOOL_FAILED"),
                 "message": _redact_sensitive_text(result.error or "Tool execution failed"),
-                "retryable": True,
+                "retryable": bool(result.retryable),
             }
             current["finished_at"] = utc_now()
             self._save_execution(current)
@@ -889,6 +973,8 @@ class CapabilityGateway:
                 "model": result.model,
                 "error_code": current["error"]["code"] if current["error"] else None,
                 "error_message": current["error"]["message"] if current["error"] else None,
+                "retryable": current["error"]["retryable"] if current["error"] else False,
+                "attempt_count": attempt_count,
             }
             self._append_event(
                 workspace_id,
@@ -904,8 +990,9 @@ class CapabilityGateway:
             message = _redact_sensitive_text(str(exc) or type(exc).__name__)
             elapsed = max(0.0, time.monotonic() - started_monotonic)
             current = self.get_execution(workspace_id, tenant_id, execution_id)
+            current["attempt_count"] = max(1, int(current.get("attempt_count") or 0))
             current["status"] = "failed"
-            current["error"] = {"code": "TOOL_EXCEPTION", "message": message, "retryable": True}
+            current["error"] = {"code": "TOOL_EXCEPTION", "message": message, "retryable": False}
             current["finished_at"] = utc_now()
             self._save_execution(current)
             failure = {

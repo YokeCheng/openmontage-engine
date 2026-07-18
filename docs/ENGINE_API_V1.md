@@ -60,6 +60,28 @@ v1 协议必须满足：
 - 平台级模型密钥不在引擎中长期保存；
 - 对外协议不暴露本地绝对路径和内部实现细节。
 
+媒体工具失败使用结构化的 `error_code` 和 `retryable` 语义。Gateway
+只对供应商限流、超时、连接失败和明确的临时错误执行有界指数退避；参数拒绝、
+无效响应和不可重试错误直接终止。每次尝试写入 `attempt_count`、
+`retry_history` 和 `execution.retrying` 事件，重试耗尽后由 CouncilForge
+创建 `provider_fallback` 人工动作，不能静默伪造媒体或自动切换到未批准的供应商。
+
+`animated-explainer` 的 `assets` 阶段要求标准 `asset_manifest` 至少登记实际媒体的
+MIME、字节数、SHA-256、媒体元数据、供应商、模型和费用；启用字幕时必须同时由
+批准脚本生成 SRT。运行时凭证只通过 `/v1/runtime/config` 注入内存，不写入
+Workspace、Checkpoint、执行快照、事件或产物。
+
+可使用真实 DashScope 配置执行重复验收：
+
+```bash
+source .env
+.venv/bin/python scripts/verify_wbs24_real_media.py
+```
+
+脚本在同一租户 Workspace 中生成一张真实图片、一条中文 WAV 和一份中文 SRT，
+写入通过 Schema 的 `asset_manifest`，并扫描整个 Workspace，确认服务令牌、
+供应商密钥和签名 URL 均未落盘。该命令会产生真实供应商费用。
+
 引擎进程启动时会检查持久化的活动执行。上一进程未能写入终态的执行会转为可重试的 `ENGINE_RESTARTED` 失败，同时追加 `execution.failed` 事件（包含 `execution_id`、`stage`和错误码）。CouncilForge 应用新 attempt 和新幂等键重试，不应覆盖原执行记录。
 
 ## 2. API 概览

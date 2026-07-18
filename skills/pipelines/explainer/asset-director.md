@@ -85,6 +85,7 @@ Asset Task:
 
 Also create tasks for:
 - **Narration audio** — one per script section (use `tts_selector` or a concrete TTS provider)
+- **Subtitles** — one UTF-8 SRT generated from the approved script sections with `subtitle_gen`; preserve each section's approved start/end timestamps and text
 - **Background music** — one track for the whole video (use `music_gen` or select from library)
 - **Sound effects** — per playbook's `sfx_style` (optional, use `music_gen` or stock)
 
@@ -179,6 +180,13 @@ Process asset tasks grouped by tool for efficiency:
 ### Step 6: Build Asset Manifest
 
 Assemble all generated assets into the manifest:
+
+For every file returned by the Capability Gateway, copy its real `media_type`,
+`size_bytes`, SHA-256 `checksum`, technical `metadata`, provider/model, and
+`cost_usd` into the matching manifest item. Never invent these values. Include
+the generated SRT as `type: "subtitle"`, `source_tool: "subtitle_gen"`, and
+`format: "srt"`. Provider credentials and temporary download URLs are never
+manifest fields.
 
 ```json
 {

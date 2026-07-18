@@ -14,6 +14,7 @@ import os
 import platform
 import subprocess
 import shutil
+import threading as _threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -132,13 +133,13 @@ class ToolResult:
     data: dict[str, Any] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    error_code: Optional[str] = None
+    retryable: bool = False
     cost_usd: float = 0.0
     duration_seconds: float = 0.0
     seed: Optional[int] = None
     model: Optional[str] = None
 
-
-import threading as _threading
 
 # Shared nesting counter for instrumented execute() calls (thread-local so
 # parallel tool threads don't see each other's depth).
