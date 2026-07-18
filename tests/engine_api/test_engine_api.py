@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 from engine_api.app import create_app
 from engine_api.renderer import (
     MediaActionRequired,
+    _fit_audio_to_timeline,
     _materialize_media,
+    _media_artifact_metadata,
+    _public_asset_src,
     _render_contract,
 )
 from engine_api.store import EngineStore, new_id, utc_now
@@ -79,6 +82,190 @@ def test_render_contract_keeps_legacy_manifest_fallback() -> None:
     assert props["title"] == "CouncilForge"
 
 
+def test_real_tts_artifact_metadata_includes_ffprobe_audio_details(tmp_path: Path) -> None:
+    import subprocess
+
+    audio = tmp_path / "narration.mp3"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.25",
+            "-codec:a",
+            "libmp3lame",
+            str(audio),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    metadata = _media_artifact_metadata(
+        audio,
+        {
+            "kind": "audio",
+            "provider": "dashscope",
+            "tool": "tts_selector",
+            "cost_usd": 0.01,
+        },
+    )
+
+    assert metadata["provider"] == "dashscope"
+    assert metadata["audio_codec"] == "mp3"
+    assert 0.2 <= metadata["duration_seconds"] <= 0.4
+
+
+def test_remotion_media_is_served_from_the_tenant_job_public_directory(tmp_path: Path) -> None:
+    public_dir = tmp_path / "job-a"
+    narration = public_dir / "assets" / "narration.wav"
+    narration.parent.mkdir(parents=True)
+    narration.write_bytes(b"RIFF")
+
+    assert _public_asset_src(narration, public_dir) == "assets/narration.wav"
+
+    outside = tmp_path / "job-b" / "secret.wav"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"RIFF")
+    with pytest.raises(ValueError, match="MEDIA_OUTSIDE_JOB_WORKSPACE"):
+        _public_asset_src(outside, public_dir)
+
+
+def test_real_narration_is_deterministically_fitted_without_truncating_words(tmp_path: Path) -> None:
+    import subprocess
+
+    source = tmp_path / "narration.wav"
+    output = tmp_path / "narration-timeline.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1.2",
+            "-c:a",
+            "pcm_s16le",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    fitted, metadata = _fit_audio_to_timeline(
+        source,
+        target_duration_seconds=0.9,
+        output_path=output,
+    )
+
+    assert fitted == output.resolve()
+    assert metadata["timeline_repaired"] is True
+    assert metadata["timeline_fit_tool"] == "ffmpeg_atempo"
+    assert metadata["original_duration_seconds"] >= 1.19
+    assert metadata["fitted_duration_seconds"] <= 1.05
+    assert 1.3 <= metadata["timeline_speed_factor"] <= 1.4
+
+
+def test_real_tts_is_materialized_per_scene_on_the_approved_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeTtsSelector:
+        def __init__(self) -> None:
+            self.inputs: list[dict] = []
+
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            self.inputs.append(inputs)
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"RIFF-per-scene")
+            return ToolResult(
+                success=True,
+                data={"output_path": str(output), "selected_provider": "dashscope"},
+                artifacts=[str(output)],
+                cost_usd=0.001,
+            )
+
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "motion_graphics",
+        "voice_provider": "dashscope",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["audio"] = {"voice": "auto", "voice_speed": 1, "music": "none"}
+    payload["render"]["duration_seconds"] = 5
+    payload["scenes"] = [
+        {
+            "scene_id": "scene-01",
+            "title": "开场",
+            "duration_seconds": 2,
+            "narration": "第一句。",
+            "visual": {"type": "motion_graphics", "prompt": "开场"},
+        },
+        {
+            "scene_id": "scene-02",
+            "title": "交付",
+            "duration_seconds": 3,
+            "narration": "第二句。",
+            "visual": {"type": "motion_graphics", "prompt": "交付"},
+        },
+    ]
+    props: dict = {"cuts": [{}, {}], "audio": {}}
+    fake = FakeTtsSelector()
+
+    from engine_api import renderer
+    from tools.tool_registry import registry
+
+    original_get = registry.get
+    monkeypatch.setattr(registry, "get", lambda name: fake if name == "tts_selector" else original_get(name))
+    monkeypatch.setattr(
+        renderer,
+        "_fit_audio_to_timeline",
+        lambda source_path, *, target_duration_seconds, output_path: (
+            Path(source_path).resolve(),
+            {
+                "timeline_repaired": False,
+                "original_duration_seconds": target_duration_seconds - 0.1,
+                "fitted_duration_seconds": target_duration_seconds - 0.1,
+                "timeline_speed_factor": 1.0,
+            },
+        ),
+    )
+
+    assets = _materialize_media(
+        payload,
+        props,
+        tmp_path / "job" / "assets",
+        EngineStore(tmp_path / "runtime"),
+        {"job_id": "job-scene-audio"},
+    )
+
+    assert [item["text"] for item in fake.inputs] == ["第一句。", "第二句。"]
+    assert props["audio"]["narration"]["segments"] == [
+        {
+            "src": "assets/narration-01.wav",
+            "start_seconds": 0.0,
+            "end_seconds": 2.0,
+            "volume": 1,
+        },
+        {
+            "src": "assets/narration-02.wav",
+            "start_seconds": 2.0,
+            "end_seconds": 5.0,
+            "volume": 1,
+        },
+    ]
+    assert [asset["metadata"]["scene_id"] for asset in assets] == ["scene-01", "scene-02"]
+
+
 def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Available:
         value = "available"
@@ -127,7 +314,7 @@ def test_approved_image_policy_executes_registry_selector_and_updates_explainer_
     store = EngineStore(tmp_path / "runtime")
     job = {"job_id": "job-media", "tenant_id": "tenant-a", "correlation_id": "corr"}
     assets = _materialize_media(payload, props, tmp_path / "assets", store, job)
-    assert props["cuts"][0]["backgroundImage"].endswith("scene-01.png")
+    assert props["cuts"][0]["backgroundImage"] == "assets/scene-01.png"
     assert assets[0]["provider"] == "test-provider"
     assert store.events("job-media")[0]["type"] == "media.asset_ready"
 

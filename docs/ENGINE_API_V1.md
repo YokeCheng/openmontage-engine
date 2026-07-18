@@ -192,6 +192,13 @@ source .env
 - `execution_mode`：`engine_managed` 保留引擎审批，`platform_managed`
   表示 CouncilForge 已完成审批并由引擎直接进入确定性执行。
 
+`platform_managed` 的 `animated-explainer` 会按已批准清单和分镜逐段调用 TTS，
+把每段真实配音放入对应镜头时间区间，再执行字幕、Remotion 和 FFmpeg。任务
+媒体必须位于租户 Job 目录并通过 Remotion `--public-dir` 读取，禁止使用
+`file://` 或跨 Job 路径。每段旁白在合成前用 FFprobe 测量；轻度超长使用
+FFmpeg `atempo` 自动适配且登记原始时长、适配时长、倍率和镜头时间区间，
+超过安全倍率则返回明确失败，不能通过截断或挪到其他镜头伪装成功。
+
 可选 `credential_grants` 是只写字段，只能携带任务范围、短时有效的凭证或不透明引用。引擎不得在任务快照、日志、事件、异常或产物中返回或明文持久化该字段。
 
 相同租户和 `Idempotency-Key`：
@@ -346,6 +353,10 @@ v1 标准事件：
 - 本地文件路径只能存在于引擎内部，不作为跨服务标识；
 - 同一逻辑产物更新时递增 `version`，旧版本不被静默覆盖；
 - 最终视频必须包含 SHA-256、大小、媒体类型和可用的媒体探测信息。
+- 真实配音产物还应包含供应商、工具、实际音频编码、时长、`scene_id`、
+  `timeline_start_seconds` 和 `timeline_end_seconds`；发生时间轴适配时，
+  必须包含 `timeline_repaired`、`original_duration_seconds`、
+  `fitted_duration_seconds` 和 `timeline_speed_factor`。
 
 ## 8. 能力与流水线发现
 
@@ -390,3 +401,5 @@ v1 允许单实例文件持久化起步，但实现必须保持以下不变量�
 - 可以用零付费的 `framework-smoke` 或演示流水线跑通创建、查询、审批、事件、取消和产物流程；
 - CouncilForge 只通过公共协议调用，不读取 OpenMontage 本地目录；
 - 端到端日志中不出现服务令牌、供应商密钥或临时凭证。
+- `animated-explainer` 的真实配音按已批准分镜分别生成并落入对应时间线，
+  尾段不能因整段音频从零秒播放而静音。

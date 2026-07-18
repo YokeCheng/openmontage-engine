@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import shutil
@@ -15,6 +16,9 @@ from typing import Any, Callable
 
 from .store import EngineStore, new_id, utc_now
 from tools.subtitle.subtitle_gen import SubtitleGen
+
+
+logger = logging.getLogger(__name__)
 
 
 class MediaActionRequired(RuntimeError):
@@ -38,6 +42,21 @@ def _media_asset(path: Path, *, kind: str, result: Any, tool_name: str) -> dict[
     }
 
 
+def _public_asset_src(path: Path, public_dir: Path) -> str:
+    """Return a Remotion ``staticFile`` source within the job public directory.
+
+    Remotion deliberately refuses ``file://`` media during rendering. Every
+    provider artifact used by a job must therefore live below that job's
+    isolated runtime directory and be addressed through ``--public-dir``.
+    """
+
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(public_dir.resolve()).as_posix()
+    except ValueError as exc:
+        raise ValueError("MEDIA_OUTSIDE_JOB_WORKSPACE") from exc
+
+
 def _materialize_media(
     manifest: dict[str, Any],
     props: dict[str, Any],
@@ -59,6 +78,7 @@ def _materialize_media(
     registry.ensure_discovered()
     asset_dir.mkdir(parents=True, exist_ok=True)
     media_assets: list[dict[str, Any]] = []
+    public_dir = asset_dir.parent
     cuts = props.get("cuts") if isinstance(props.get("cuts"), list) else []
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     aspect_ratio = str((manifest.get("render") or {}).get("aspect_ratio") or "16:9")
@@ -122,7 +142,7 @@ def _materialize_media(
             output_path = asset_dir / f"{scene_id}{suffix}"
             if output_path.is_file() and output_path.stat().st_size > 0:
                 field = "backgroundImage" if source_mode == "ai_image" else "backgroundVideo"
-                cut[field] = str(output_path.resolve())
+                cut[field] = _public_asset_src(output_path, public_dir)
                 cut["backgroundOverlay"] = 0.45
                 media_assets.append(
                     {
@@ -154,7 +174,7 @@ def _materialize_media(
                 fallback(scene_id, source_mode)
                 continue
             field = "backgroundImage" if source_mode == "ai_image" else "backgroundVideo"
-            cut[field] = str(path)
+            cut[field] = _public_asset_src(path, public_dir)
             cut["backgroundOverlay"] = 0.45
             asset = _media_asset(
                 path,
@@ -200,7 +220,7 @@ def _materialize_media(
                     fallback(scene_id, "stock")
                     continue
                 field = "backgroundImage" if item.get("kind") == "image" else "backgroundVideo"
-                cut[field] = str(path)
+                cut[field] = _public_asset_src(path, public_dir)
                 cut["backgroundOverlay"] = 0.45
                 media_assets.append(
                     {
@@ -217,34 +237,93 @@ def _materialize_media(
 
     if voice_provider != "none":
         selector = registry.get("tts_selector")
-        narration = "\n".join(str(scene.get("narration") or "").strip() for scene in scenes).strip()
-        narration_path = asset_dir / "narration.mp3"
-        if narration_path.is_file() and narration_path.stat().st_size > 0:
-            props.setdefault("audio", {})["narration"] = {"src": str(narration_path.resolve()), "volume": 1}
-            media_assets.append(
-                {
-                    "path": narration_path.resolve(),
-                    "kind": "audio",
-                    "tool": "cached",
-                    "provider": voice_provider,
-                    "cost_usd": 0.0,
+        if selector is None or selector.get_status().value != "available":
+            fallback("narration", "tts")
+        else:
+            narration_segments: list[dict[str, Any]] = []
+            cursor_seconds = 0.0
+            for index, scene in enumerate(scenes):
+                scene_id = str(scene.get("scene_id") or f"scene-{index + 1:02d}")
+                narration = str(scene.get("narration") or "").strip()
+                scene_duration = max(0.25, float(scene.get("duration_seconds") or 0.25))
+                if not narration:
+                    cursor_seconds += scene_duration
+                    continue
+
+                # Synthesise one approved sentence per scene. A single
+                # concatenated TTS file starts every later sentence too early
+                # and leaves the second half of sparse 30-second videos silent.
+                # Scene segments preserve the approved storyboard timing and
+                # make burned-in captions line up with the spoken content.
+                narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
+                if narration_path.is_file() and narration_path.stat().st_size > 0:
+                    narration_asset: dict[str, Any] | None = {
+                        "path": narration_path.resolve(),
+                        "kind": "audio",
+                        "tool": "cached",
+                        "provider": voice_provider,
+                        "cost_usd": 0.0,
+                    }
+                else:
+                    result = selector.execute(
+                        {
+                            "text": narration,
+                            "preferred_provider": voice_provider,
+                            "speed": float((manifest.get("audio") or {}).get("voice_speed") or 1),
+                            "output_path": str(narration_path),
+                        }
+                    )
+                    path = _first_output(result) if result.success else None
+                    narration_asset = (
+                        _media_asset(path, kind="audio", result=result, tool_name="tts_selector")
+                        if path
+                        else None
+                    )
+                if narration_asset is None:
+                    fallback(scene_id, "tts")
+                    cursor_seconds += scene_duration
+                    continue
+
+                target_duration = max(0.25, scene_duration - 0.35)
+                fitted_path, fit_metadata = _fit_audio_to_timeline(
+                    narration_asset["path"],
+                    target_duration_seconds=target_duration,
+                    output_path=asset_dir / f"narration-{index + 1:02d}-timeline.wav",
+                )
+                scene_end = cursor_seconds + scene_duration
+                narration_asset["path"] = fitted_path
+                narration_asset["metadata"] = {
+                    **fit_metadata,
+                    "scene_id": scene_id,
+                    "timeline_start_seconds": round(cursor_seconds, 3),
+                    "timeline_end_seconds": round(scene_end, 3),
                 }
-            )
-        elif selector is not None and selector.get_status().value == "available" and narration:
-            result = selector.execute(
-                {
-                    "text": narration,
-                    "preferred_provider": voice_provider,
-                    "speed": float((manifest.get("audio") or {}).get("voice_speed") or 1),
-                    "output_path": str(narration_path),
+                narration_segments.append(
+                    {
+                        "src": _public_asset_src(fitted_path, public_dir),
+                        "start_seconds": round(cursor_seconds, 3),
+                        "end_seconds": round(scene_end, 3),
+                        "volume": 1,
+                    }
+                )
+                media_assets.append(narration_asset)
+                if fit_metadata["timeline_repaired"]:
+                    store.append_event(
+                        job,
+                        "media.audio_timeline_repaired",
+                        {
+                            "scene_id": scene_id,
+                            "original_duration_seconds": fit_metadata["original_duration_seconds"],
+                            "fitted_duration_seconds": fit_metadata["fitted_duration_seconds"],
+                            "speed_factor": fit_metadata["timeline_speed_factor"],
+                        },
+                    )
+                cursor_seconds = scene_end
+            if narration_segments:
+                props.setdefault("audio", {})["narration"] = {
+                    "volume": 1,
+                    "segments": narration_segments,
                 }
-            )
-            path = _first_output(result) if result.success else None
-            if path:
-                props.setdefault("audio", {})["narration"] = {"src": str(path), "volume": 1}
-                media_assets.append(_media_asset(path, kind="audio", result=result, tool_name="tts_selector"))
-            else:
-                fallback("narration", "tts")
 
     if music_provider != "none":
         music_path = asset_dir / "music.mp3"
@@ -348,6 +427,78 @@ def _ffprobe(path: Path) -> dict[str, Any]:
     }
 
 
+def _fit_audio_to_timeline(
+    source_path: Path,
+    *,
+    target_duration_seconds: float,
+    output_path: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Keep all approved narration audible within the final video timeline."""
+
+    original_duration = float(_ffprobe(source_path)["duration_seconds"])
+    if original_duration <= target_duration_seconds:
+        return source_path.resolve(), {
+            "timeline_repaired": False,
+            "original_duration_seconds": original_duration,
+            "fitted_duration_seconds": original_duration,
+            "timeline_speed_factor": 1.0,
+        }
+
+    speed_factor = original_duration / target_duration_seconds
+    if speed_factor > 1.5:
+        raise ValueError("NARRATION_EXCEEDS_SAFE_TIMELINE_REPAIR")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix}")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(source_path),
+            "-filter:a",
+            f"atempo={speed_factor:.8f}",
+            "-vn",
+            "-c:a",
+            "pcm_s16le",
+            str(temporary),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    os.replace(temporary, output_path)
+    fitted_duration = float(_ffprobe(output_path)["duration_seconds"])
+    if fitted_duration > target_duration_seconds + 0.15:
+        raise ValueError("NARRATION_TIMELINE_REPAIR_FAILED")
+    return output_path.resolve(), {
+        "timeline_repaired": True,
+        "timeline_fit_tool": "ffmpeg_atempo",
+        "original_duration_seconds": original_duration,
+        "fitted_duration_seconds": fitted_duration,
+        "timeline_speed_factor": round(speed_factor, 4),
+    }
+
+
+def _media_artifact_metadata(media_path: Path, media_asset: dict[str, Any]) -> dict[str, Any]:
+    metadata = {
+        "provider": media_asset["provider"],
+        "tool": media_asset["tool"],
+        "cost_usd": media_asset["cost_usd"],
+    }
+    if media_asset["kind"] in {"audio", "video"}:
+        try:
+            metadata.update(_ffprobe(media_path))
+        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+            # The final video remains the hard verification gate. Keep an
+            # intermediate provider artifact available on an unusual codec.
+            pass
+    if isinstance(media_asset.get("metadata"), dict):
+        metadata.update(media_asset["metadata"])
+    return metadata
+
+
 def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
     job = store.load_job(job_id)
     if not job or job["status"] in {"cancelled", "succeeded"}:
@@ -381,7 +532,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             composer = repo_root / "remotion-composer"
             command = [
                 "npx", "remotion", "render", "src/index.tsx", composition_id,
-                str(output_path), f"--props={props_path}", "--codec=h264",
+                str(output_path), f"--props={props_path}", f"--public-dir={job_dir}", "--codec=h264",
             ]
             process = subprocess.Popen(command, cwd=composer)
             while process.poll() is None:
@@ -426,6 +577,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             except ValueError:
                 continue
             media_type = mimetypes.guess_type(media_path.name)[0] or "application/octet-stream"
+            media_metadata = _media_artifact_metadata(media_path, media_asset)
             artifacts.append(
                 {
                     "artifact_id": media_id,
@@ -442,11 +594,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                         "value": hashlib.sha256(media_path.read_bytes()).hexdigest(),
                     },
                     "created_at": utc_now(),
-                    "metadata": {
-                        "provider": media_asset["provider"],
-                        "tool": media_asset["tool"],
-                        "cost_usd": media_asset["cost_usd"],
-                    },
+                    "metadata": media_metadata,
                 }
             )
         artifacts.append(video_artifact)
@@ -506,6 +654,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
     except MediaActionRequired:
         return
     except Exception as exc:
+        logger.exception("Video render failed for job %s", job_id)
         current = store.load_job(job_id)
         if not current or current["status"] == "cancelled":
             return

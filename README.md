@@ -6,7 +6,7 @@ OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calest
 
 它不承担平台级用户交互、需求理解、模型决策或多智能体编排；这些职责统一由 CouncilForge 负责。OpenMontage Engine 向 CouncilForge 提供原生 Pipeline、阶段 Director Skill、标准产物 Schema、工具契约、隔离工作区、Checkpoint、事件、渲染和产物输出。
 
-> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 是无模型的能力边界。CouncilForge 按 Pipeline 阶段驱动工具并提交标准 Checkpoint，本地与云端工具的执行结果都由引擎验证和登记。
+> 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 是无模型的能力边界。当前 `animated-explainer` 由 CouncilForge 一次生成并批准完整执行清单，再通过 `/v1/jobs` 交给引擎确定性执行；Workspace、阶段工具与 Checkpoint 协议继续保留给历史任务和后续高级 Pipeline。
 
 ## 系统边界
 
@@ -15,7 +15,7 @@ OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calest
       │
       ▼
 CouncilForge（唯一 Agent 大脑与流程控制器）
-      │  Pipeline / Tool / Checkpoint / Event
+      │  Approved Manifest / Job / Event / Artifact
       ▼
 OpenMontage Engine（视频执行引擎）
       │
@@ -55,7 +55,7 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 .venv/bin/python -m uvicorn engine_api.app:app --host 127.0.0.1 --port 8100
 ```
 
-API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/workspaces` 提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。每次工具执行必须属于当前 Pipeline 阶段的工具白名单，路径限制在租户 Workspace 内，幂等键防止重复执行。可选 `trace_id`、`platform_job_id` 和 `stage_attempt` 将 CouncilForge Job 关联到 Workspace、Tool Execution、供应商、耗时、费用和安全错误。标准阶段产物在写入完成或待审批 Checkpoint 前按 `schemas/artifacts/` 验证。引擎重启时，未完成的工具执行会持久化为 `ENGINE_RESTARTED` 可重试失败，并写入带序号的 `execution.failed` 事件，而不会静默消失。当前零密钥 Remotion 路径使用本地系统字体栈，不在渲染时依赖 Google Fonts 网络，可真实输出 H.264/AAC MP4 和 SRT；云端图片、视频、TTS 与音乐能力按工具注册表实时报告。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
+API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/jobs` 接收平台已批准的清单并异步执行真实媒体工具，`/v1/workspaces` 继续提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。任务媒体只通过当前 Job 的 Remotion `public-dir` 提供，绝不把宿主绝对路径交给浏览器渲染器。`animated-explainer` 按已批准分镜逐段调用真实 TTS，并把每段音频放入对应时间线；每段均先用 FFprobe 校验时长，轻度超长时 FFmpeg `atempo` 会在安全范围内保留全部文案并适配镜头，原始时长、适配时长、倍率和时间区间进入产物元数据，严重超长则明确失败而不是静默截断。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
 
 OpenMontage 是传输和产物契约的事实源。FastAPI 生成的规范 OpenAPI 提交在 `schemas/api/engine_api.openapi.json`，版本、操作集合和全部 Schema 摘要提交在 `schemas/api/engine_api.contract.json`。修改公共路由、请求模型或产物 Schema 后必须重新导出并运行 stale check：
 
@@ -70,11 +70,21 @@ uv run python scripts/export_engine_api_contract.py --check
 
 ## 当前平台接入
 
-CouncilForge 使用以下能力接口驱动 OpenMontage，而不是在引擎中启动第二个 Agent：
+CouncilForge 使用以下能力接口驱动 OpenMontage，而不是在引擎中启动第二个 Agent。当前产品主线使用 Job 清单执行：
 
 ```text
 GET  /v1/contract
 GET  /v1/tools
+POST /v1/jobs
+GET  /v1/jobs/{job_id}
+GET  /v1/jobs/{job_id}/events
+GET  /v1/jobs/{job_id}/artifacts
+GET  /v1/jobs/{job_id}/artifacts/{artifact_id}/content
+```
+
+历史阶段式任务和后续高级 Pipeline 仍可使用能力 Workspace：
+
+```text
 GET  /v1/agent-skills/{skill_name}
 POST /v1/workspaces
 GET  /v1/workspaces/{workspace_id}/stages/{stage}/context
@@ -85,8 +95,6 @@ POST /v1/workspaces/{workspace_id}/cancel
 GET  /v1/workspaces/{workspace_id}/artifacts
 GET  /v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content
 ```
-
-旧 `/v1/jobs` 清单执行 API 继续保留，用于兼容已创建任务和零密钥回归。新建 CouncilForge 视频任务默认使用 Workspace 阶段式运行时。
 
 ## 上游与长期演进
 
