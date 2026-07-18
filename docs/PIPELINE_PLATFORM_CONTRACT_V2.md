@@ -28,6 +28,6 @@ Every stage referenced by capability or approval policy must exist in the Pipeli
 
 ## CouncilForge validation lifecycle
 
-CouncilForge rejects `validation` Pipelines during normal product operation. An explicit `VIDEO_PIPELINE_VALIDATION_MODE=true` enables them only for real acceptance work. After one new task proves the complete checkpoint chain, actual tool executions, artifact manifest, media probe, platform playback/download and restart recovery, the evidence identity can be committed and readiness changed to `ready`.
+CouncilForge rejects `validation` Pipelines during normal product operation. An explicit `VIDEO_PIPELINE_VALIDATION_MODE=true` enables them only for real acceptance work. After one new task proves the complete checkpoint chain, actual tool executions, artifact manifest, media probe, platform playback/download and restart recovery, the evidence identity is committed and readiness changes to `ready`.
 
-`animated-explainer` is the first v2 contract. It remains `validation` until the CouncilForge WBS 2.7 task passes; no other Pipeline is expanded as part of that acceptance.
+`animated-explainer` is the first v2 contract. It is `ready` based on CouncilForge task `job_25c18f1fc69c45c3872545d36ea017bd`; no other Pipeline was expanded as part of that acceptance.

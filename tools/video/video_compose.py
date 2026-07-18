@@ -6,7 +6,8 @@ at proposal stage.
 
 Routing is driven by `edit_decisions.render_runtime` (locked at proposal):
 
-- `remotion`   → React-based frame-accurate render via `npx remotion render`.
+- `remotion`   → React-based frame-accurate render via the repository-local
+                 Remotion CLI (with `npx` only as an install-diagnostics fallback).
                  Handles the existing scene-component stack, word-level captions,
                  TalkingHead/CinematicRenderer. Current default.
 - `hyperframes` → HTML/CSS/GSAP render via `hyperframes_compose`.
@@ -81,7 +82,14 @@ class VideoCompose(BaseTool):
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["compose", "render", "remotion_render", "burn_subtitles", "overlay", "encode"],
+                "enum": [
+                    "compose",
+                    "render",
+                    "remotion_render",
+                    "burn_subtitles",
+                    "overlay",
+                    "encode",
+                ],
                 "description": (
                     "compose: low-level concat cuts + audio + subtitles. "
                     "render: high-level — resolves asset IDs, auto-routes to Remotion "
@@ -100,10 +108,7 @@ class VideoCompose(BaseTool):
             },
             "asset_manifest": {
                 "type": "object",
-                "description": (
-                    "Full asset_manifest artifact (required for render). "
-                    "Used to resolve asset IDs in cuts[].source to file paths."
-                ),
+                "description": ("Full asset_manifest artifact (required for render). Used to resolve asset IDs in cuts[].source to file paths."),
             },
             "proposal_packet": {
                 "type": "object",
@@ -137,10 +142,7 @@ class VideoCompose(BaseTool):
             },
             "script_text": {
                 "type": "string",
-                "description": (
-                    "Inline source narration script. Used by "
-                    "transcript_comparison when a file path is unavailable."
-                ),
+                "description": ("Inline source narration script. Used by transcript_comparison when a file path is unavailable."),
             },
             "subtitle_path": {"type": "string"},
             "subtitle_style": {
@@ -172,13 +174,14 @@ class VideoCompose(BaseTool):
                     },
                 },
             },
-            "audio_path": {"type": "string", "description": "Mixed audio to mux into output"},
+            "audio_path": {
+                "type": "string",
+                "description": "Mixed audio to mux into output",
+            },
             "profile": {
                 "type": "string",
                 "description": (
-                    "Media profile name from media_profiles.py "
-                    "(e.g. youtube_landscape, tiktok, instagram_reels). "
-                    "Applied in render and encode operations."
+                    "Media profile name from media_profiles.py (e.g. youtube_landscape, tiktok, instagram_reels). Applied in render and encode operations."
                 ),
             },
             "options": {
@@ -204,14 +207,20 @@ class VideoCompose(BaseTool):
         },
     }
 
-    resource_profile = ResourceProfile(
-        cpu_cores=4, ram_mb=2048, vram_mb=0, disk_mb=5000, network_required=False
-    )
+    resource_profile = ResourceProfile(cpu_cores=4, ram_mb=2048, vram_mb=0, disk_mb=5000, network_required=False)
 
     # Remotion scene types that trigger React-based rendering
     _REMOTION_COMPONENTS = [
-        "text_card", "stat_card", "callout", "comparison",
-        "progress", "chart", "bar_chart", "line_chart", "pie_chart", "kpi_grid",
+        "text_card",
+        "stat_card",
+        "callout",
+        "comparison",
+        "progress",
+        "chart",
+        "bar_chart",
+        "line_chart",
+        "pie_chart",
+        "kpi_grid",
     ]
 
     best_for = [
@@ -258,6 +267,7 @@ class VideoCompose(BaseTool):
         """
         try:
             from tools.video.hyperframes_compose import HyperFramesCompose
+
             return bool(HyperFramesCompose()._runtime_check()["runtime_available"])
         except Exception:
             return False
@@ -294,13 +304,10 @@ class VideoCompose(BaseTool):
             composer_dir = Path(__file__).resolve().parent.parent.parent / "remotion-composer"
             if composer_dir.exists() and (composer_dir / "package.json").exists() and not (composer_dir / "node_modules").exists():
                 info["remotion_note"] = (
-                    "Remotion project exists but node_modules are NOT installed. "
-                    "Run 'cd remotion-composer && npm install' to enable Remotion rendering."
+                    "Remotion project exists but node_modules are NOT installed. Run 'cd remotion-composer && npm install' to enable Remotion rendering."
                 )
             else:
-                info["remotion_note"] = (
-                    "Remotion is NOT available (needs Node.js/npx + remotion-composer + node_modules)."
-                )
+                info["remotion_note"] = "Remotion is NOT available (needs Node.js/npx + remotion-composer + node_modules)."
 
         if hyperframes_ok:
             info["hyperframes_note"] = (
@@ -401,7 +408,10 @@ class VideoCompose(BaseTool):
             workspace_root / source,
             repo_root / source,
         ]
-        resolved = next((candidate.resolve() for candidate in candidates if candidate.exists()), None)
+        resolved = next(
+            (candidate.resolve() for candidate in candidates if candidate.exists()),
+            None,
+        )
         if resolved is None or not resolved.is_file():
             return src
 
@@ -428,9 +438,7 @@ class VideoCompose(BaseTool):
             if isinstance(layer, dict) and isinstance(layer.get("segments"), list):
                 for segment in layer["segments"]:
                     if isinstance(segment, dict) and isinstance(segment.get("src"), str):
-                        segment["src"] = cls._stage_public_asset(
-                        segment["src"], output_path=output_path, namespace=namespace
-                    )
+                        segment["src"] = cls._stage_public_asset(segment["src"], output_path=output_path, namespace=namespace)
 
     @classmethod
     def _stage_remotion_visual_assets(cls, props: dict[str, Any], output_path: Path) -> None:
@@ -443,24 +451,17 @@ class VideoCompose(BaseTool):
             for key in ("source", "backgroundImage", "backgroundVideo"):
                 value = cut.get(key)
                 if isinstance(value, str) and value:
-                    cut[key] = cls._stage_public_asset(
-                        value, output_path=output_path, namespace=namespace
-                    )
+                    cut[key] = cls._stage_public_asset(value, output_path=output_path, namespace=namespace)
             if isinstance(cut.get("images"), list):
                 cut["images"] = [
-                    cls._stage_public_asset(value, output_path=output_path, namespace=namespace)
-                    if isinstance(value, str)
-                    else value
-                    for value in cut["images"]
+                    cls._stage_public_asset(value, output_path=output_path, namespace=namespace) if isinstance(value, str) else value for value in cut["images"]
                 ]
         for overlay in props.get("overlays", []):
             if not isinstance(overlay, dict):
                 continue
             value = overlay.get("asset_path")
             if isinstance(value, str) and value:
-                overlay["asset_path"] = cls._stage_public_asset(
-                    value, output_path=output_path, namespace=namespace
-                )
+                overlay["asset_path"] = cls._stage_public_asset(value, output_path=output_path, namespace=namespace)
 
     @staticmethod
     def _audio_from_asset_manifest(asset_manifest: dict[str, Any]) -> dict[str, Any]:
@@ -471,7 +472,13 @@ class VideoCompose(BaseTool):
             asset_type = str(asset.get("type") or "").lower()
             subtype = str(asset.get("subtype") or asset_type).lower()
             path = str(asset.get("path") or asset.get("output") or asset.get("output_path") or asset.get("file_path") or "")
-            if not path or asset_type not in {"audio", "music", "narration", "voice", "voiceover"}:
+            if not path or asset_type not in {
+                "audio",
+                "music",
+                "narration",
+                "voice",
+                "voiceover",
+            }:
                 continue
             if subtype == "music" and "music" not in audio:
                 audio["music"] = {
@@ -482,17 +489,16 @@ class VideoCompose(BaseTool):
                     "fadeOutSeconds": float(asset.get("fade_out_seconds") or 0.8),
                 }
             elif subtype in {"narration", "voice", "voiceover"} and "narration" not in audio:
-                audio["narration"] = {"src": path, "volume": float(asset.get("volume") or 1)}
+                audio["narration"] = {
+                    "src": path,
+                    "volume": float(asset.get("volume") or 1),
+                }
         return audio
 
     @classmethod
     def _with_manifest_audio(cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]) -> dict[str, Any]:
         merged = json.loads(json.dumps(edit_decisions))
-        asset_lookup = {
-            str(asset.get("id")): asset
-            for asset in asset_manifest.get("assets", [])
-            if isinstance(asset, dict) and asset.get("id")
-        }
+        asset_lookup = {str(asset.get("id")): asset for asset in asset_manifest.get("assets", []) if isinstance(asset, dict) and asset.get("id")}
         manifest_audio = cls._audio_from_asset_manifest(asset_manifest)
         audio = merged.get("audio")
         if not isinstance(audio, dict):
@@ -524,7 +530,10 @@ class VideoCompose(BaseTool):
                     existing.setdefault(field, field_value)
                 if key == "music" and existing.get("src"):
                     try:
-                        existing["volume"] = max(float(existing.get("volume") or 0), float(value.get("volume") or 0.85))
+                        existing["volume"] = max(
+                            float(existing.get("volume") or 0),
+                            float(value.get("volume") or 0.85),
+                        )
                     except (TypeError, ValueError):
                         existing["volume"] = float(value.get("volume") or 0.85)
             else:
@@ -578,11 +587,7 @@ class VideoCompose(BaseTool):
             total_weight = sum(max(1, len(chunk)) for chunk in chunks)
             cursor = start
             for index, chunk in enumerate(chunks):
-                chunk_end = (
-                    end
-                    if index == len(chunks) - 1
-                    else cursor + (end - start) * max(1, len(chunk)) / total_weight
-                )
+                chunk_end = end if index == len(chunks) - 1 else cursor + (end - start) * max(1, len(chunk)) / total_weight
                 captions.append(
                     {
                         "word": chunk,
@@ -594,18 +599,12 @@ class VideoCompose(BaseTool):
         return captions, "" if has_cjk else " "
 
     @classmethod
-    def _with_manifest_subtitles(
-        cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _with_manifest_subtitles(cls, edit_decisions: dict[str, Any], asset_manifest: dict[str, Any]) -> dict[str, Any]:
         merged = json.loads(json.dumps(edit_decisions))
         subtitles = merged.get("subtitles")
         if not isinstance(subtitles, dict) or not subtitles.get("enabled"):
             return merged
-        asset_lookup = {
-            str(asset.get("id")): asset
-            for asset in asset_manifest.get("assets", [])
-            if isinstance(asset, dict) and asset.get("id")
-        }
+        asset_lookup = {str(asset.get("id")): asset for asset in asset_manifest.get("assets", []) if isinstance(asset, dict) and asset.get("id")}
         source = str(subtitles.get("source") or "")
         referenced = asset_lookup.get(source)
         if referenced is not None and referenced.get("path"):
@@ -623,9 +622,7 @@ class VideoCompose(BaseTool):
                     "maxWidthPercent": float(subtitles.get("max_width_percent") or 80),
                     "bottomMarginPercent": float(subtitles.get("bottom_margin_percent") or 7.5),
                     "color": str(subtitles.get("color") or "#F8FAFC"),
-                    "backgroundColor": str(
-                        subtitles.get("background") or "rgba(15, 23, 42, 0.75)"
-                    ),
+                    "backgroundColor": str(subtitles.get("background") or "rgba(15, 23, 42, 0.75)"),
                 }
         merged["subtitles"] = subtitles
         return merged
@@ -643,10 +640,15 @@ class VideoCompose(BaseTool):
         try:
             out = subprocess.check_output(
                 [
-                    "ffprobe", "-v", "error",
-                    "-select_streams", "a",
-                    "-show_entries", "stream=codec_type",
-                    "-of", "default=nw=1:nk=1",
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "default=nw=1:nk=1",
                     str(path),
                 ],
                 stderr=subprocess.STDOUT,
@@ -695,6 +697,7 @@ class VideoCompose(BaseTool):
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
+
                 p = get_profile(profile_name)
                 resolution = f"{p.width}x{p.height}"
             except (ImportError, ValueError):
@@ -767,10 +770,14 @@ class VideoCompose(BaseTool):
                     # gives exact cut boundaries. Same resolution in → same
                     # resolution out, so same-res inputs concat cleanly.
                     cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(in_s),
-                        "-t", str(duration),
-                        "-i", str(source),
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(in_s),
+                        "-t",
+                        str(duration),
+                        "-i",
+                        str(source),
                     ]
 
                     # Normalize every segment to a consistent container so the
@@ -797,20 +804,27 @@ class VideoCompose(BaseTool):
                     vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
                     af_parts: list[str] = []
                     if speed != 1.0:
-                        vf_parts.append(f"setpts={1.0/speed}*PTS")
+                        vf_parts.append(f"setpts={1.0 / speed}*PTS")
                         af_parts.append(self._build_atempo(speed))
 
                     cmd.extend(["-filter:v", ",".join(vf_parts)])
                     if af_parts:
                         cmd.extend(["-filter:a", ",".join(af_parts)])
 
-                    cmd.extend([
-                        "-c:v", codec,
-                        "-crf", str(crf),
-                        "-preset", preset,
-                        "-pix_fmt", "yuv420p",
-                        "-r", "30",
-                    ])
+                    cmd.extend(
+                        [
+                            "-c:v",
+                            codec,
+                            "-crf",
+                            str(crf),
+                            "-preset",
+                            preset,
+                            "-pix_fmt",
+                            "yuv420p",
+                            "-r",
+                            "30",
+                        ]
+                    )
 
                     # Audio handling: some source clips have no audio stream
                     # (Pexels stock often ships silent). If we unconditionally
@@ -826,30 +840,51 @@ class VideoCompose(BaseTool):
                         # We have to rebuild cmd to add the lavfi input
                         # before the output path and map streams explicitly.
                         cmd = [
-                            "ffmpeg", "-y",
-                            "-ss", str(in_s),
-                            "-t", str(duration),
-                            "-i", str(source),
-                            "-f", "lavfi",
-                            "-t", str(duration),
-                            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-                            "-filter:v", ",".join(vf_parts),
+                            "ffmpeg",
+                            "-y",
+                            "-ss",
+                            str(in_s),
+                            "-t",
+                            str(duration),
+                            "-i",
+                            str(source),
+                            "-f",
+                            "lavfi",
+                            "-t",
+                            str(duration),
+                            "-i",
+                            "anullsrc=channel_layout=stereo:sample_rate=48000",
+                            "-filter:v",
+                            ",".join(vf_parts),
                         ]
                         if af_parts:
                             cmd.extend(["-filter:a", ",".join(af_parts)])
-                        cmd.extend([
-                            "-map", "0:v:0",
-                            "-map", "1:a:0",
-                            "-c:v", codec,
-                            "-crf", str(crf),
-                            "-preset", preset,
-                            "-pix_fmt", "yuv420p",
-                            "-r", "30",
-                            "-c:a", "aac",
-                            "-b:a", "192k",
-                            "-ar", "48000",
-                            "-ac", "2",
-                        ])
+                        cmd.extend(
+                            [
+                                "-map",
+                                "0:v:0",
+                                "-map",
+                                "1:a:0",
+                                "-c:v",
+                                codec,
+                                "-crf",
+                                str(crf),
+                                "-preset",
+                                preset,
+                                "-pix_fmt",
+                                "yuv420p",
+                                "-r",
+                                "30",
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                "192k",
+                                "-ar",
+                                "48000",
+                                "-ac",
+                                "2",
+                            ]
+                        )
 
                     cmd.append(str(seg_path))
                     self.run_command(cmd)
@@ -865,10 +900,16 @@ class VideoCompose(BaseTool):
 
             concat_out = temp_dir / "concat.mp4"
             cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", str(concat_path),
-                "-c", "copy",
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_path),
+                "-c",
+                "copy",
                 str(concat_out),
             ]
             self.run_command(cmd)
@@ -895,6 +936,7 @@ class VideoCompose(BaseTool):
             if profile_name:
                 try:
                     from lib.media_profiles import get_profile
+
                     p = get_profile(profile_name)
                     profile_flags = ["-s", f"{p.width}x{p.height}", "-r", str(p.fps)]
                 except (ImportError, ValueError):
@@ -948,7 +990,12 @@ class VideoCompose(BaseTool):
                     pass
 
     _REMOTION_SCENE_TYPES = {
-        "text_card", "stat_card", "callout", "comparison", "progress", "chart",
+        "text_card",
+        "stat_card",
+        "callout",
+        "comparison",
+        "progress",
+        "chart",
     }
 
     # Maps renderer_family (set at proposal stage) to Remotion composition ID.
@@ -977,9 +1024,7 @@ class VideoCompose(BaseTool):
         comp = cls.RENDERER_FAMILY_MAP.get(renderer_family)
         if comp is None:
             raise ValueError(
-                f"Unknown renderer_family {renderer_family!r}. "
-                f"Valid families: {sorted(cls.RENDERER_FAMILY_MAP)}. "
-                f"Set renderer_family at proposal stage."
+                f"Unknown renderer_family {renderer_family!r}. Valid families: {sorted(cls.RENDERER_FAMILY_MAP)}. Set renderer_family at proposal stage."
             )
         return comp
 
@@ -1029,10 +1074,7 @@ class VideoCompose(BaseTool):
         if not composer_dir.exists() or not (composer_dir / "node_modules").exists():
             return ToolResult(
                 success=False,
-                error=(
-                    f"remotion-composer or its node_modules is missing at {composer_dir}. "
-                    f"Run `cd remotion-composer && npm install` first."
-                ),
+                error=(f"remotion-composer or its node_modules is missing at {composer_dir}. Run `cd remotion-composer && npm install` first."),
             )
 
         entry_path = Path(entry)
@@ -1073,7 +1115,14 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", "renders/output.mp4")).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ["npx", "remotion", "render", str(effective_entry), str(comp_id), str(output_path)]
+        cmd = [
+            "npx",
+            "remotion",
+            "render",
+            str(effective_entry),
+            str(comp_id),
+            str(output_path),
+        ]
 
         props_path = bespoke.get("props_path")
         if props_path:
@@ -1149,10 +1198,7 @@ class VideoCompose(BaseTool):
         if final_review.get("status") == "fail":
             return ToolResult(
                 success=False,
-                error=(
-                    "Atelier render produced an invalid output:\n"
-                    + "\n".join(f"  • {i}" for i in final_review.get("issues_found", []))
-                ),
+                error=("Atelier render produced an invalid output:\n" + "\n".join(f"  • {i}" for i in final_review.get("issues_found", []))),
                 data=data,
                 artifacts=[str(output_path)],
             )
@@ -1204,13 +1250,13 @@ class VideoCompose(BaseTool):
 
         # If a stale junction/symlink is in the way from an earlier (failed) attempt,
         # remove it before creating a real staging directory.
-        if staging_dir.is_symlink() or (staging_dir.exists() and staging_dir.is_dir()
-                                        and staging_dir.resolve() != staging_dir):
+        if staging_dir.is_symlink() or (staging_dir.exists() and staging_dir.is_dir() and staging_dir.resolve() != staging_dir):
             try:
                 staging_dir.unlink()
             except (OSError, PermissionError):
                 # Some Windows junctions need rmdir
                 import subprocess as _sp
+
                 _sp.run(["cmd", "/c", "rmdir", str(staging_dir)], check=True)
 
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -1269,7 +1315,12 @@ class VideoCompose(BaseTool):
 
         try:
             for f in project_dir.rglob("*"):
-                if not f.is_file() or f.suffix.lower() not in {".tsx", ".ts", ".jsx", ".js"}:
+                if not f.is_file() or f.suffix.lower() not in {
+                    ".tsx",
+                    ".ts",
+                    ".jsx",
+                    ".js",
+                }:
                     continue
                 try:
                     txt = f.read_text(encoding="utf-8", errors="replace")
@@ -1331,6 +1382,7 @@ class VideoCompose(BaseTool):
         if playbook_name:
             try:
                 from styles.playbook_loader import load_playbook
+
                 playbook = load_playbook(playbook_name)
             except Exception:
                 pass
@@ -1358,7 +1410,14 @@ class VideoCompose(BaseTool):
                 if val:
                     chart_colors.append(val[0] if isinstance(val, list) else val)
             if len(chart_colors) < 3:
-                chart_colors = [primary, accent, "#10B981", "#8B5CF6", "#EC4899", "#06B6D4"]
+                chart_colors = [
+                    primary,
+                    accent,
+                    "#10B981",
+                    "#8B5CF6",
+                    "#EC4899",
+                    "#06B6D4",
+                ]
 
             theme = {
                 "primaryColor": primary,
@@ -1378,10 +1437,7 @@ class VideoCompose(BaseTool):
             # Derive caption colors from the palette
             theme["captionHighlightColor"] = primary
             # Caption background: semi-transparent version of the bg color
-            theme["captionBackgroundColor"] = (
-                "rgba(255, 255, 255, 0.85)" if bg.upper() in ("#FFFFFF", "#FAFAFA", "#F9FAFB")
-                else "rgba(15, 23, 42, 0.75)"
-            )
+            theme["captionBackgroundColor"] = "rgba(255, 255, 255, 0.85)" if bg.upper() in ("#FFFFFF", "#FAFAFA", "#F9FAFB") else "rgba(15, 23, 42, 0.75)"
 
             # Motion style from playbook
             motion = playbook.get("motion", {})
@@ -1484,6 +1540,7 @@ class VideoCompose(BaseTool):
         if delivery_data:
             try:
                 from lib.delivery_promise import DeliveryPromise
+
                 promise = DeliveryPromise.from_dict(delivery_data)
                 result = promise.validate_cuts(resolved_cuts)
                 if not result["valid"]:
@@ -1516,20 +1573,16 @@ class VideoCompose(BaseTool):
         if scenes:
             try:
                 from lib.slideshow_risk import score_slideshow_risk
+
                 render_runtime = edit_decisions.get("render_runtime")
-                risk = score_slideshow_risk(
-                    scenes, edit_decisions, renderer_family, render_runtime
-                )
+                risk = score_slideshow_risk(scenes, edit_decisions, renderer_family, render_runtime)
                 if risk["verdict"] == "fail":
                     blocks.append(
                         f"Slideshow risk score {risk['average']:.1f}/5.0 (verdict: fail). "
                         f"Video plan looks like a slideshow — revise scene plan before rendering."
                     )
                 elif risk["verdict"] == "revise":
-                    warnings.append(
-                        f"Slideshow risk score {risk['average']:.1f}/5.0 (verdict: revise). "
-                        f"Consider improving scene variety before final render."
-                    )
+                    warnings.append(f"Slideshow risk score {risk['average']:.1f}/5.0 (verdict: revise). Consider improving scene variety before final render.")
             except Exception as e:
                 log.warning("Could not compute slideshow risk: %s", e)
 
@@ -1605,9 +1658,7 @@ class VideoCompose(BaseTool):
             return ToolResult(
                 success=False,
                 error=(
-                    f"Unknown render_runtime {render_runtime!r}. "
-                    f"Valid values: remotion, hyperframes, ffmpeg. "
-                    f"render_runtime must be set at proposal stage."
+                    f"Unknown render_runtime {render_runtime!r}. Valid values: remotion, hyperframes, ffmpeg. render_runtime must be set at proposal stage."
                 ),
             )
 
@@ -1619,10 +1670,7 @@ class VideoCompose(BaseTool):
         # under remotion-composer/projects/<slug>/ and points this renderer at
         # it. No reusable creative components; a new visual language per video.
         # Triggered by composition_mode="atelier" (or renderer_family="bespoke").
-        remotion_atelier_requested = (
-            edit_decisions.get("composition_mode") == "atelier"
-            or edit_decisions.get("renderer_family") == "bespoke"
-        )
+        remotion_atelier_requested = edit_decisions.get("composition_mode") == "atelier" or edit_decisions.get("renderer_family") == "bespoke"
         if render_runtime == "remotion" and remotion_atelier_requested:
             return self._render_via_atelier(inputs, edit_decisions)
 
@@ -1660,10 +1708,7 @@ class VideoCompose(BaseTool):
                     resolved_cut.setdefault("type", "text_card")
                     resolved_cut.setdefault(
                         "text",
-                        cut.get("text")
-                        or cut.get("title")
-                        or cut.get("reason")
-                        or str(source_id),
+                        cut.get("text") or cut.get("title") or cut.get("reason") or str(source_id),
                     )
                     resolved_cut.setdefault("metadata", {})
                     if isinstance(resolved_cut["metadata"], dict):
@@ -1763,9 +1808,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
-                script_text=inputs.get("script_text") or self._read_text_file(
-                    inputs.get("script_path")
-                ),
+                script_text=inputs.get("script_text") or self._read_text_file(inputs.get("script_path")),
             )
 
             # Attach final_review to the ToolResult data so the compose-director
@@ -1779,10 +1822,7 @@ class VideoCompose(BaseTool):
             output_checksum = hashlib.sha256(output_path.read_bytes()).hexdigest()
             subtitle_source = str((edit_decisions.get("subtitles") or {}).get("source") or "")
             subtitle_path = Path(subtitle_source) if subtitle_source else None
-            frame_paths = (
-                ((final_review.get("checks") or {}).get("visual_spotcheck") or {}).get("frame_paths")
-                or []
-            )
+            frame_paths = ((final_review.get("checks") or {}).get("visual_spotcheck") or {}).get("frame_paths") or []
             poster_path: Path | None = None
             if frame_paths:
                 first_frame = Path(str(frame_paths[0]))
@@ -1824,9 +1864,7 @@ class VideoCompose(BaseTool):
                 },
             }
             render_result.data["render_report"] = render_report
-            render_result.data["subtitle_path"] = (
-                str(subtitle_path) if subtitle_path is not None and subtitle_path.is_file() else None
-            )
+            render_result.data["subtitle_path"] = str(subtitle_path) if subtitle_path is not None and subtitle_path.is_file() else None
             render_result.data["poster_path"] = str(poster_path) if poster_path else None
             artifact_paths = list(render_result.artifacts or [])
             for extra_path in (subtitle_path, poster_path):
@@ -1839,8 +1877,7 @@ class VideoCompose(BaseTool):
                 return ToolResult(
                     success=False,
                     error=(
-                        "Post-render self-review FAILED. The output is not presentable.\n"
-                        + "\n".join(f"  • {i}" for i in final_review.get("issues_found", []))
+                        "Post-render self-review FAILED. The output is not presentable.\n" + "\n".join(f"  • {i}" for i in final_review.get("issues_found", []))
                     ),
                     data=render_result.data,
                 )
@@ -1885,21 +1922,16 @@ class VideoCompose(BaseTool):
                 error=f"Could not import hyperframes_compose: {e}",
             )
 
-        workspace_path = (
-            inputs.get("workspace_path")
-            or str(output_path.parent.parent / "hyperframes")
-        )
+        workspace_path = inputs.get("workspace_path") or str(output_path.parent.parent / "hyperframes")
 
         # Pass the playbook through so the style bridge can emit CSS vars.
         playbook_data = inputs.get("playbook")
         if not playbook_data:
-            playbook_name = (
-                inputs.get("playbook_name")
-                or (edit_decisions.get("metadata") or {}).get("playbook")
-            )
+            playbook_name = inputs.get("playbook_name") or (edit_decisions.get("metadata") or {}).get("playbook")
             if playbook_name:
                 try:
                     from styles.playbook_loader import load_playbook  # type: ignore
+
                     playbook_data = load_playbook(playbook_name)
                 except Exception:
                     playbook_data = None
@@ -1945,9 +1977,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
-                script_text=inputs.get("script_text") or self._read_text_file(
-                    inputs.get("script_path")
-                ),
+                script_text=inputs.get("script_text") or self._read_text_file(inputs.get("script_path")),
             )
             if render_result.data is None:
                 render_result.data = {}
@@ -2005,9 +2035,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
-                script_text=inputs.get("script_text") or self._read_text_file(
-                    inputs.get("script_path")
-                ),
+                script_text=inputs.get("script_text") or self._read_text_file(inputs.get("script_path")),
             )
             if render_result.data is None:
                 render_result.data = {}
@@ -2059,11 +2087,7 @@ class VideoCompose(BaseTool):
         # This ensures every video gets a unique visual identity derived
         # from its production decisions — not picked from a preset menu.
         if "themeConfig" not in props:
-            playbook_name = (
-                props.get("playbook")
-                or props.get("theme")
-                or props.get("metadata", {}).get("playbook")
-            )
+            playbook_name = props.get("playbook") or props.get("theme") or props.get("metadata", {}).get("playbook")
             theme_config = self._build_theme_from_playbook(playbook_name, composition_data)
             if theme_config:
                 props["themeConfig"] = theme_config
@@ -2089,8 +2113,18 @@ class VideoCompose(BaseTool):
         renderer_family = (composition_data or {}).get("renderer_family", "explainer-data")
         composition_id = self._get_composition_id(renderer_family)
 
+        # A long-lived engine must not route every render through `npx`.
+        # Concurrent `npx remotion` calls can serialize or stall while npm
+        # resolves the same local package, leaving executions marked running
+        # without ever launching Chromium. Resolve the already-installed local
+        # CLI directly; retain npx only to preserve an actionable failure on an
+        # incomplete developer checkout.
+        local_bin_dir = composer_dir / "node_modules" / ".bin"
+        remotion_cli = shutil.which("remotion", path=str(local_bin_dir))
+        render_command = [remotion_cli] if remotion_cli else ["npx", "remotion"]
         cmd = [
-            "npx", "remotion", "render",
+            *render_command,
+            "render",
             str(composer_dir / "src" / "index.tsx"),
             composition_id,
             str(output_path),
@@ -2107,6 +2141,7 @@ class VideoCompose(BaseTool):
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
+
                 p = get_profile(profile_name)
                 cmd.extend(["--width", str(p.width), "--height", str(p.height)])
             except (ImportError, ValueError):
@@ -2146,10 +2181,7 @@ class VideoCompose(BaseTool):
         except subprocess.TimeoutExpired as e:
             return ToolResult(
                 success=False,
-                error=(
-                    f"Remotion render timed out after {e.timeout}s. If the headless "
-                    "browser is slow to start, raise remotion_timeout_ms (ms)."
-                ),
+                error=(f"Remotion render timed out after {e.timeout}s. If the headless browser is slow to start, raise remotion_timeout_ms (ms)."),
             )
         except Exception as e:
             return ToolResult(success=False, error=f"Remotion render failed: {e}")
@@ -2170,9 +2202,7 @@ class VideoCompose(BaseTool):
                 "output": str(output_path),
                 "profile": profile_name,
                 "caption_count": len(props.get("captions") or []),
-                "narration_segment_count": len(
-                    ((props.get("audio") or {}).get("narration") or {}).get("segments") or []
-                ),
+                "narration_segment_count": len(((props.get("audio") or {}).get("narration") or {}).get("segments") or []),
             },
             artifacts=[str(output_path)],
         )
@@ -2187,12 +2217,27 @@ class VideoCompose(BaseTool):
     # review is the difference between catching a bad voice render in-tool
     # vs. shipping a video that says "dot dot dot" twelve times. CRITICAL.
     _TTS_PUNCTUATION_LEAK_WORDS = {
-        "dot", "dots", "ellipsis", "period", "periods",
-        "comma", "commas", "semicolon", "colon",
-        "dash", "hyphen", "emdash", "endash",
-        "parenthesis", "bracket", "brace",
-        "asterisk", "slash", "backslash",
-        "exclamation", "question mark",
+        "dot",
+        "dots",
+        "ellipsis",
+        "period",
+        "periods",
+        "comma",
+        "commas",
+        "semicolon",
+        "colon",
+        "dash",
+        "hyphen",
+        "emdash",
+        "endash",
+        "parenthesis",
+        "bracket",
+        "brace",
+        "asterisk",
+        "slash",
+        "backslash",
+        "exclamation",
+        "question mark",
     }
 
     @staticmethod
@@ -2250,14 +2295,10 @@ class VideoCompose(BaseTool):
         }
 
         if not transcript_path or not Path(transcript_path).is_file():
-            result["issues"].append(
-                "transcript_comparison skipped: narration_transcript not provided"
-            )
+            result["issues"].append("transcript_comparison skipped: narration_transcript not provided")
             return result
         if not script_text:
-            result["issues"].append(
-                "transcript_comparison skipped: script_text not provided"
-            )
+            result["issues"].append("transcript_comparison skipped: script_text not provided")
             return result
 
         try:
@@ -2266,9 +2307,7 @@ class VideoCompose(BaseTool):
             result["issues"].append(f"transcript_comparison could not parse transcript: {e}")
             return result
 
-        transcript_words = [
-            w.get("word", "").strip() for w in transcript_data.get("word_timestamps", [])
-        ]
+        transcript_words = [w.get("word", "").strip() for w in transcript_data.get("word_timestamps", [])]
         transcript_tokens = cls._tokenize(" ".join(transcript_words))
         script_tokens = cls._tokenize(script_text)
 
@@ -2276,10 +2315,7 @@ class VideoCompose(BaseTool):
         result["transcript_word_count"] = len(transcript_tokens)
 
         if not script_tokens or not transcript_tokens:
-            result["issues"].append(
-                f"transcript_comparison: empty token set "
-                f"(script={len(script_tokens)}, transcript={len(transcript_tokens)})"
-            )
+            result["issues"].append(f"transcript_comparison: empty token set (script={len(script_tokens)}, transcript={len(transcript_tokens)})")
             return result
 
         # --- Punctuation-leak detection (TTS reading literal punctuation) ---
@@ -2290,12 +2326,8 @@ class VideoCompose(BaseTool):
                 leak_occurrences[token] = leak_occurrences.get(token, 0) + 1
 
         if leak_occurrences:
-            formatted = ", ".join(
-                f"{w!r}×{n}" for w, n in sorted(leak_occurrences.items(), key=lambda x: -x[1])
-            )
-            result["spurious_punctuation_words"] = [
-                {"word": w, "count": n} for w, n in leak_occurrences.items()
-            ]
+            formatted = ", ".join(f"{w!r}×{n}" for w, n in sorted(leak_occurrences.items(), key=lambda x: -x[1]))
+            result["spurious_punctuation_words"] = [{"word": w, "count": n} for w, n in leak_occurrences.items()]
             result["issues"].append(
                 f"TTS punctuation leak: transcript contains {formatted} — "
                 f"these words are NOT in the script, which means the voice "
@@ -2357,20 +2389,22 @@ class VideoCompose(BaseTool):
         }
         try:
             cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", "-show_streams", str(output_path),
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(output_path),
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if proc.returncode == 0:
                 probe_data = json.loads(proc.stdout)
                 fmt = probe_data.get("format", {})
                 streams = probe_data.get("streams", [])
-                video_stream = next(
-                    (s for s in streams if s.get("codec_type") == "video"), {}
-                )
-                audio_stream = next(
-                    (s for s in streams if s.get("codec_type") == "audio"), {}
-                )
+                video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+                audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), {})
 
                 duration = float(fmt.get("duration", 0))
                 width = int(video_stream.get("width", 0))
@@ -2392,36 +2426,26 @@ class VideoCompose(BaseTool):
 
                 # Sanity checks
                 if duration < 1.0:
-                    technical_probe["issues"].append(
-                        f"Output is only {duration:.1f}s — suspiciously short"
-                    )
+                    technical_probe["issues"].append(f"Output is only {duration:.1f}s — suspiciously short")
 
                 # Check target duration from edit_decisions
                 target_dur = None
                 if edit_decisions:
-                    target_dur = (
-                        edit_decisions.get("total_duration_seconds")
-                        or edit_decisions.get("metadata", {}).get("target_duration_seconds")
-                    )
+                    target_dur = edit_decisions.get("total_duration_seconds") or edit_decisions.get("metadata", {}).get("target_duration_seconds")
                 if target_dur and target_dur > 0:
                     drift_pct = abs(duration - target_dur) / target_dur
                     if drift_pct > 0.25:
                         technical_probe["issues"].append(
-                            f"Duration drift: rendered {duration:.1f}s vs target {target_dur}s "
-                            f"({drift_pct:.0%} off). Review pacing or trim."
+                            f"Duration drift: rendered {duration:.1f}s vs target {target_dur}s ({drift_pct:.0%} off). Review pacing or trim."
                         )
                     technical_probe["target_duration"] = target_dur
                     technical_probe["duration_drift_pct"] = round(drift_pct * 100, 1)
                 if width < 320 or height < 240:
-                    technical_probe["issues"].append(
-                        f"Resolution {width}x{height} is very low"
-                    )
+                    technical_probe["issues"].append(f"Resolution {width}x{height} is very low")
                 if not audio_stream:
                     technical_probe["issues"].append("No audio stream in output")
             else:
-                technical_probe["issues"].append(
-                    f"ffprobe failed with exit code {proc.returncode}"
-                )
+                technical_probe["issues"].append(f"ffprobe failed with exit code {proc.returncode}")
         except FileNotFoundError:
             technical_probe["issues"].append("ffprobe not found — cannot validate output")
         except Exception as e:
@@ -2451,9 +2475,16 @@ class VideoCompose(BaseTool):
                     ts = round(duration * pct, 2)
                     frame_path = frame_dir / f"review_frame_{i}.png"
                     cmd = [
-                        "ffmpeg", "-y", "-ss", str(ts),
-                        "-i", str(output_path),
-                        "-frames:v", "1", "-q:v", "2",
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(ts),
+                        "-i",
+                        str(output_path),
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "2",
                         str(frame_path),
                     ]
                     subprocess.run(cmd, capture_output=True, timeout=15)
@@ -2469,19 +2500,20 @@ class VideoCompose(BaseTool):
                 visual_spotcheck["frame_paths"] = frame_paths
 
                 if len(frame_paths) < 4:
-                    visual_spotcheck["issues"].append(
-                        f"Only {len(frame_paths)}/4 frames extracted — some timestamps may be out of range"
-                    )
+                    visual_spotcheck["issues"].append(f"Only {len(frame_paths)}/4 frames extracted — some timestamps may be out of range")
                 if visual_spotcheck["black_frames_detected"]:
-                    visual_spotcheck["issues"].append(
-                        "Black frame detected — possible missing asset or failed render segment"
-                    )
+                    visual_spotcheck["issues"].append("Black frame detected — possible missing asset or failed render segment")
             except Exception as e:
                 visual_spotcheck["issues"].append(f"Frame sampling error: {e}")
 
         issues.extend(visual_spotcheck.get("issues", []))
 
         # --- 3. Audio spotcheck ---
+        audio_config = edit_decisions.get("audio") if isinstance(edit_decisions, dict) else {}
+        narration_config = audio_config.get("narration") if isinstance(audio_config, dict) else None
+        music_config = audio_config.get("music") if isinstance(audio_config, dict) else None
+        narration_expected = bool(isinstance(narration_config, dict) and (narration_config.get("src") or narration_config.get("segments")))
+        music_expected = bool(isinstance(music_config, dict) and (music_config.get("src") or music_config.get("asset_id")))
         audio_spotcheck: dict[str, Any] = {
             "narration_present": False,
             "music_present": False,
@@ -2494,12 +2526,16 @@ class VideoCompose(BaseTool):
             try:
                 # Use ffmpeg volumedetect to check audio levels
                 cmd = [
-                    "ffmpeg", "-i", str(output_path),
-                    "-af", "volumedetect", "-f", "null", "-",
+                    "ffmpeg",
+                    "-i",
+                    str(output_path),
+                    "-af",
+                    "volumedetect",
+                    "-f",
+                    "null",
+                    "-",
                 ]
-                proc = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=60
-                )
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                 stderr = proc.stderr or ""
                 # Parse mean_volume and max_volume
                 mean_vol = None
@@ -2519,21 +2555,19 @@ class VideoCompose(BaseTool):
                 if mean_vol is not None:
                     if mean_vol < -60:
                         audio_spotcheck["unexpected_silence"] = True
-                        audio_spotcheck["issues"].append(
-                            f"Mean volume {mean_vol:.1f} dB — effectively silent"
-                        )
-                    # Assume narration present if mean volume is reasonable
-                    if mean_vol > -40:
+                        audio_spotcheck["issues"].append(f"Mean volume {mean_vol:.1f} dB — effectively silent")
+                    # A mixed output stream cannot identify narration versus
+                    # music by volume alone. Report only the layers declared
+                    # by the resolved edit decision; otherwise narration-only
+                    # videos were incorrectly labelled as containing music.
+                    if narration_expected and mean_vol > -40:
                         audio_spotcheck["narration_present"] = True
-                    # Assume music present if audio exists (conservative)
-                    if mean_vol > -50:
+                    if music_expected and mean_vol > -50:
                         audio_spotcheck["music_present"] = True
 
                 if max_vol is not None and max_vol > -0.5:
                     audio_spotcheck["clipping_detected"] = True
-                    audio_spotcheck["issues"].append(
-                        f"Max volume {max_vol:.1f} dB — possible clipping"
-                    )
+                    audio_spotcheck["issues"].append(f"Max volume {max_vol:.1f} dB — possible clipping")
             except Exception as e:
                 audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
 
@@ -2564,50 +2598,36 @@ class VideoCompose(BaseTool):
                 proposal_runtime: str | None = None
                 runtime_source: str | None = None
                 if proposal_packet:
-                    pp_runtime = (
-                        (proposal_packet.get("production_plan") or {}).get("render_runtime")
-                        or ""
-                    ).strip().lower()
+                    pp_runtime = ((proposal_packet.get("production_plan") or {}).get("render_runtime") or "").strip().lower()
                     if pp_runtime:
                         proposal_runtime = pp_runtime
                         runtime_source = "proposal_packet.production_plan.render_runtime"
                 if proposal_runtime is None:
-                    md_runtime = (
-                        (edit_decisions.get("metadata") or {}).get("proposal_render_runtime")
-                        or ""
-                    ).strip().lower()
+                    md_runtime = ((edit_decisions.get("metadata") or {}).get("proposal_render_runtime") or "").strip().lower()
                     if md_runtime:
                         proposal_runtime = md_runtime
                         runtime_source = "edit_decisions.metadata.proposal_render_runtime"
 
                 if proposal_runtime is None:
                     promise_preservation["runtime_swap_check"] = (
-                        "skipped — no proposal_packet or proposal_render_runtime "
-                        "metadata provided. Reviewer skill does cross-artifact "
-                        "comparison separately."
+                        "skipped — no proposal_packet or proposal_render_runtime metadata provided. Reviewer skill does cross-artifact comparison separately."
                     )
                 elif proposal_runtime != render_runtime_edit:
                     promise_preservation["runtime_swap_detected"] = True
-                    promise_preservation["runtime_swap_check"] = (
-                        f"detected — source: {runtime_source}"
-                    )
+                    promise_preservation["runtime_swap_check"] = f"detected — source: {runtime_source}"
                     promise_preservation["issues"].append(
                         f"render_runtime changed between proposal ({proposal_runtime}) "
                         f"and compose ({render_runtime_edit}) — this is a contract "
                         f"violation unless a render_runtime_selection decision was logged."
                     )
                 else:
-                    promise_preservation["runtime_swap_check"] = (
-                        f"ok — proposal and edit agree ({runtime_source})"
-                    )
+                    promise_preservation["runtime_swap_check"] = f"ok — proposal and edit agree ({runtime_source})"
 
-            delivery_data = (
-                edit_decisions.get("metadata", {}).get("delivery_promise")
-                or edit_decisions.get("delivery_promise")
-            )
+            delivery_data = edit_decisions.get("metadata", {}).get("delivery_promise") or edit_decisions.get("delivery_promise")
             if delivery_data:
                 try:
                     from lib.delivery_promise import DeliveryPromise
+
                     promise = DeliveryPromise.from_dict(delivery_data)
                     cuts = edit_decisions.get("cuts", [])
                     result = promise.validate_cuts(cuts)
@@ -2620,17 +2640,11 @@ class VideoCompose(BaseTool):
                             promise_preservation["issues"].append(v)
 
                     # Detect silent downgrade: motion-led promise but <50% motion
-                    if (delivery_data.get("type") == "motion_led"
-                            and motion_ratio < 0.5):
+                    if delivery_data.get("type") == "motion_led" and motion_ratio < 0.5:
                         promise_preservation["silent_downgrade_detected"] = True
-                        promise_preservation["issues"].append(
-                            f"Motion-led promise but only {motion_ratio:.0%} motion — "
-                            f"silent downgrade to still-led"
-                        )
+                        promise_preservation["issues"].append(f"Motion-led promise but only {motion_ratio:.0%} motion — silent downgrade to still-led")
                 except Exception as e:
-                    promise_preservation["issues"].append(
-                        f"Could not validate delivery promise: {e}"
-                    )
+                    promise_preservation["issues"].append(f"Could not validate delivery promise: {e}")
 
         issues.extend(promise_preservation.get("issues", []))
 
@@ -2648,13 +2662,17 @@ class VideoCompose(BaseTool):
             if technical_probe.get("valid_container"):
                 try:
                     cmd = [
-                        "ffprobe", "-v", "quiet", "-print_format", "json",
-                        "-show_streams", "-select_streams", "s",
+                        "ffprobe",
+                        "-v",
+                        "quiet",
+                        "-print_format",
+                        "json",
+                        "-show_streams",
+                        "-select_streams",
+                        "s",
                         str(output_path),
                     ]
-                    proc = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=15
-                    )
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
                     if proc.returncode == 0:
                         sub_data = json.loads(proc.stdout)
                         sub_streams = sub_data.get("streams", [])
@@ -2662,8 +2680,7 @@ class VideoCompose(BaseTool):
 
                     # If subtitles were expected but not found as a stream,
                     # they may be burned in (which is fine — not a failure)
-                    if (subtitle_check["subtitles_expected"]
-                            and not subtitle_check["subtitles_present"]):
+                    if subtitle_check["subtitles_expected"] and not subtitle_check["subtitles_present"]:
                         # Remotion captions are burned into picture and do not
                         # appear as a subtitle stream. Require actual parsed
                         # caption timing as proof; an SRT merely existing on
@@ -2677,18 +2694,12 @@ class VideoCompose(BaseTool):
                         # but its render path consumes the concrete source.
                         sub_source = ed_subs.get("source")
                         render_runtime = str(edit_decisions.get("render_runtime") or "")
-                        if (
-                            not subtitle_check["subtitles_present"]
-                            and render_runtime == "ffmpeg"
-                            and sub_source
-                            and Path(sub_source).exists()
-                        ):
+                        if not subtitle_check["subtitles_present"] and render_runtime == "ffmpeg" and sub_source and Path(sub_source).exists():
                             subtitle_check["subtitles_present"] = True
                             subtitle_check["coverage_ratio"] = 1.0
                         if not subtitle_check["subtitles_present"]:
                             subtitle_check["issues"].append(
-                                "Subtitles expected but no rendered Remotion captions, "
-                                "FFmpeg burn-in evidence, or subtitle stream was found"
+                                "Subtitles expected but no rendered Remotion captions, FFmpeg burn-in evidence, or subtitle stream was found"
                             )
                 except Exception as e:
                     subtitle_check["issues"].append(f"Subtitle check error: {e}")
@@ -2708,12 +2719,19 @@ class VideoCompose(BaseTool):
 
         # --- 7. Determine overall status ---
         critical_issues = [
-            i for i in issues
-            if any(kw in i.lower() for kw in [
-                "silent downgrade", "delivery promise violation",
-                "effectively silent", "ffprobe failed", "suspiciously short",
-                "tts punctuation leak",  # reading literal punctuation aloud
-            ])
+            i
+            for i in issues
+            if any(
+                kw in i.lower()
+                for kw in [
+                    "silent downgrade",
+                    "delivery promise violation",
+                    "effectively silent",
+                    "ffprobe failed",
+                    "suspiciously short",
+                    "tts punctuation leak",  # reading literal punctuation aloud
+                ]
+            )
         ]
 
         if critical_issues:
@@ -2730,13 +2748,7 @@ class VideoCompose(BaseTool):
             status = "fail"
             recommended_action = "re_render"
 
-        audio_config = edit_decisions.get("audio") if isinstance(edit_decisions, dict) else {}
-        narration_config = audio_config.get("narration") if isinstance(audio_config, dict) else None
-        audio_expected = bool(
-            isinstance(narration_config, dict)
-            and (narration_config.get("src") or narration_config.get("segments"))
-        )
-        if audio_expected and not technical_probe.get("has_audio"):
+        if narration_expected and not technical_probe.get("has_audio"):
             status = "fail"
             recommended_action = "re_render"
         if subtitle_check.get("subtitles_expected") and not subtitle_check.get("subtitles_present"):
@@ -2761,7 +2773,9 @@ class VideoCompose(BaseTool):
 
         log.info(
             "Final review: status=%s, issues=%d, action=%s",
-            status, len(issues), recommended_action,
+            status,
+            len(issues),
+            recommended_action,
         )
 
         return final_review
@@ -2795,11 +2809,18 @@ class VideoCompose(BaseTool):
         crf = inputs.get("crf", 23)
 
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_path),
-            "-vf", f"subtitles='{sub_escaped}':force_style='{ass_style}'",
-            "-c:v", codec, "-crf", str(crf),
-            "-c:a", "copy",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            f"subtitles='{sub_escaped}':force_style='{ass_style}'",
+            "-c:v",
+            codec,
+            "-crf",
+            str(crf),
+            "-c:a",
+            "copy",
             str(output_path),
         ]
 
@@ -2856,9 +2877,7 @@ class VideoCompose(BaseTool):
             enable = f"between(t,{start},{end})" if end else f"gte(t,{start})"
             out_label = f"v{i}"
 
-            filter_parts.append(
-                f"[{prev_label}][{overlay_input}]overlay={x}:{y}:enable='{enable}'[{out_label}]"
-            )
+            filter_parts.append(f"[{prev_label}][{overlay_input}]overlay={x}:{y}:enable='{enable}'[{out_label}]")
             prev_label = out_label
 
         filter_complex = ";".join(filter_parts)
@@ -2895,16 +2914,27 @@ class VideoCompose(BaseTool):
             return ToolResult(success=False, error=f"Input not found: {input_path}")
 
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_path),
-            "-c:v", codec, "-crf", str(crf), "-preset", preset,
-            "-c:a", "aac", "-b:a", "192k",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-c:v",
+            codec,
+            "-crf",
+            str(crf),
+            "-preset",
+            preset,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
         ]
 
         # Apply media profile if specified
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
+
                 profile = get_profile(profile_name)
                 cmd.extend(["-s", f"{profile.width}x{profile.height}"])
                 cmd.extend(["-r", str(profile.fps)])

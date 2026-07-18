@@ -15,7 +15,11 @@ def test_animation_descriptor_asset_is_not_forwarded_as_image_source(tmp_path, m
 
     monkeypatch.setattr(VideoCompose, "_remotion_available", lambda self: True)
     monkeypatch.setattr(VideoCompose, "_remotion_render", fake_render)
-    monkeypatch.setattr(VideoCompose, "_run_final_review", lambda *args, **kwargs: {"status": "pass", "issues_found": []})
+    monkeypatch.setattr(
+        VideoCompose,
+        "_run_final_review",
+        lambda *args, **kwargs: {"status": "pass", "issues_found": []},
+    )
 
     result = VideoCompose().execute(
         {
@@ -67,11 +71,16 @@ def test_remotion_audio_assets_are_staged_from_repo_music_library(tmp_path, monk
     def fake_run_command(self, cmd, timeout=None, cwd=None):
         props_arg = next(item for item in cmd if item.startswith("--props="))
         captured["props_path"] = props_arg.split("=", 1)[1]
-        output_path = cmd[5]
+        props_index = cmd.index(props_arg)
+        output_path = cmd[props_index - 1]
         open(output_path, "wb").write(b"fake mp4")
 
     monkeypatch.setattr(VideoCompose, "run_command", fake_run_command)
-    monkeypatch.setattr(VideoCompose, "_run_final_review", lambda *args, **kwargs: {"status": "pass", "issues_found": []})
+    monkeypatch.setattr(
+        VideoCompose,
+        "_run_final_review",
+        lambda *args, **kwargs: {"status": "pass", "issues_found": []},
+    )
 
     result = tool._remotion_render(
         {
@@ -252,7 +261,10 @@ def test_render_returns_probe_backed_report_srt_and_poster(tmp_path, monkeypatch
                     "issues": [],
                 },
                 "visual_spotcheck": {"frame_paths": [str(frame)]},
-                "subtitle_check": {"subtitles_expected": True, "subtitles_present": True},
+                "subtitle_check": {
+                    "subtitles_expected": True,
+                    "subtitles_present": True,
+                },
             },
             "issues_found": [],
             "recommended_action": "present_to_user",
@@ -278,7 +290,14 @@ def test_render_returns_probe_backed_report_srt_and_poster(tmp_path, monkeypatch
             "edit_decisions": {
                 "render_runtime": "remotion",
                 "renderer_family": "explainer-data",
-                "cuts": [{"id": "cut-1", "source": "image-1", "in_seconds": 0, "out_seconds": 3}],
+                "cuts": [
+                    {
+                        "id": "cut-1",
+                        "source": "image-1",
+                        "in_seconds": 0,
+                        "out_seconds": 3,
+                    }
+                ],
                 "audio": {"narration": {"segments": [{"asset_id": "narration-1", "start_seconds": 0}]}},
                 "subtitles": {"enabled": True, "source": "subtitle-1"},
             },

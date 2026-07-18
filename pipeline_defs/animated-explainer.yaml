@@ -22,10 +22,10 @@ reference_input:
 
 platform_contract:
   version: "2.0"
-  readiness: validation
+  readiness: ready
   intake_adapter: councilforge-video-brief-v1
   intake_schema: councilforge-video-brief-v1
-  status_reason: "已具备结构化 Brief 接入合同，完成同一条真实中文视频全链路验收后才升级为 ready。"
+  status_reason: "已通过 CouncilForge 页面创建、阶段审批、真实中文媒体生产、Remotion 合成、MinIO 交付、播放下载和重启恢复验收。"
   input_modes:
     - generated_from_brief
     - reference_video_optional
@@ -93,7 +93,7 @@ platform_contract:
       - publish
   artifact_schema_contract: councilforge-video-agent-v1
   acceptance:
-    status: pending_real_e2e
+    status: validated
     required_evidence:
       - job_id
       - workspace_id
@@ -104,6 +104,8 @@ platform_contract:
       - playback
       - download
       - restart_recovery
+    evidence_id: job_25c18f1fc69c45c3872545d36ea017bd
+    validated_at: "2026-07-18T20:45:48+08:00"
 
 extensions:
   custom_scripts: true

@@ -10,7 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from engine_api.app import create_app
-from engine_api.renderer import MediaActionRequired, _materialize_media, _render_contract
+from engine_api.renderer import (
+    MediaActionRequired,
+    _materialize_media,
+    _render_contract,
+)
 from engine_api.store import EngineStore, new_id, utc_now
 from tools.base_tool import RetryPolicy, ToolResult
 
@@ -33,7 +37,13 @@ def manifest(title: str = "CouncilForge") -> dict:
             }
         ],
         "audio": {"voice": "none", "music": "none"},
-        "render": {"aspect_ratio": "16:9", "width": 640, "height": 360, "fps": 24, "duration_seconds": 1},
+        "render": {
+            "aspect_ratio": "16:9",
+            "width": 640,
+            "height": 360,
+            "fps": 24,
+            "duration_seconds": 1,
+        },
         "budget": {"maximum_usd": 0},
         "fallback_policy": {"video_generation": ["motion_graphics"]},
     }
@@ -69,9 +79,7 @@ def test_render_contract_keeps_legacy_manifest_fallback() -> None:
     assert props["title"] == "CouncilForge"
 
 
-def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Available:
         value = "available"
 
@@ -124,9 +132,7 @@ def test_approved_image_policy_executes_registry_selector_and_updates_explainer_
     assert store.events("job-media")[0]["type"] == "media.asset_ready"
 
 
-def test_unavailable_approved_media_pauses_for_fallback_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unavailable_approved_media_pauses_for_fallback_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Unavailable:
         value = "unavailable"
 
@@ -192,13 +198,21 @@ def headers(tenant: str = "tenant-a", key: str = "create-1") -> dict[str, str]:
     return {"X-Tenant-ID": tenant, "Idempotency-Key": key}
 
 
-def create(client: TestClient, *, title: str = "CouncilForge", tenant: str = "tenant-a", key: str = "create-1") -> dict:
+def create(
+    client: TestClient,
+    *,
+    title: str = "CouncilForge",
+    tenant: str = "tenant-a",
+    key: str = "create-1",
+) -> dict:
     response = client.post("/v1/jobs", json=request_body(title, tenant), headers=headers(tenant, key))
     assert response.status_code == 202
     return response.json()
 
 
-def test_create_waits_for_script_and_budget_approval_and_never_persists_credentials(client: TestClient) -> None:
+def test_create_waits_for_script_and_budget_approval_and_never_persists_credentials(
+    client: TestClient,
+) -> None:
     job = create(client)
     assert job["status"] == "waiting_approval"
     assert job["approval"]["status"] == "pending"
@@ -207,14 +221,24 @@ def test_create_waits_for_script_and_budget_approval_and_never_persists_credenti
     assert "credential_grants" not in runtime_text
 
 
-def test_platform_managed_job_skips_duplicate_engine_approval(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_platform_managed_job_skips_duplicate_engine_approval(client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fixture = tmp_path / "platform-approved.mp4"
     import subprocess
 
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x14232D:s=320x180:d=0.3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(fixture)],
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x14232D:s=320x180:d=0.3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(fixture),
+        ],
         check=True,
         capture_output=True,
     )
@@ -288,11 +312,7 @@ def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephe
         )
         assert repeated.status_code == 200
         assert repeated.json() == configured.json()
-        runtime_text = "\n".join(
-            path.read_text(errors="ignore")
-            for path in client.app.state.store.root.rglob("*")
-            if path.is_file()
-        )
+        runtime_text = "\n".join(path.read_text(errors="ignore") for path in client.app.state.store.root.rglob("*") if path.is_file())
         assert "runtime-only-secret" not in runtime_text
     finally:
         import os
@@ -340,30 +360,39 @@ def test_runtime_configuration_refresh_does_not_block_health(
         assert pending.result(timeout=3).status_code == 200
 
 
-def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient) -> None:
+def test_pipeline_catalog_exposes_platform_contract_readiness(
+    client: TestClient,
+) -> None:
     response = client.get("/v1/pipelines")
     assert response.status_code == 200
     pipelines = {item["name"]: item for item in response.json()["pipelines"]}
 
     explainer = pipelines["animated-explainer"]["platform_contract"]
     assert explainer["version"] == "2.0"
-    assert explainer["readiness"] == "validation"
+    assert explainer["readiness"] == "ready"
     assert explainer["intake_adapter"] == "councilforge-video-brief-v1"
     assert explainer["intake_schema"] == "councilforge-video-brief-v1"
-    assert explainer["acceptance"]["status"] == "pending_real_e2e"
+    assert explainer["acceptance"]["status"] == "validated"
+    assert explainer["acceptance"]["evidence_id"] == "job_25c18f1fc69c45c3872545d36ea017bd"
     assert "knowledge_explainer" in explainer["supported_formats"]
     assert explainer["required_source_materials"] == []
-    assert {
-        item["capability"] for item in explainer["capability_requirements"]
-    } >= {"video_post", "tts", "image_generation", "video_generation"}
+    assert {item["capability"] for item in explainer["capability_requirements"]} >= {
+        "video_post",
+        "tts",
+        "image_generation",
+        "video_generation",
+    }
 
     animation = pipelines["animation"]["platform_contract"]
     assert animation["readiness"] == "ready"
     assert animation["intake_adapter"] == "councilforge-video-brief-v1"
     assert animation["required_source_materials"] == []
-    assert {
-        item["capability"] for item in animation["capability_requirements"]
-    } >= {"video_post", "graphics", "tts", "music_library"}
+    assert {item["capability"] for item in animation["capability_requirements"]} >= {
+        "video_post",
+        "graphics",
+        "tts",
+        "music_library",
+    }
 
     talking_head = pipelines["talking-head"]["platform_contract"]
     assert talking_head["readiness"] == "ready"
@@ -373,16 +402,10 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
     screen_demo = pipelines["screen-demo"]["platform_contract"]
     assert screen_demo["readiness"] == "ready"
     assert screen_demo["intake_adapter"] == "councilforge-source-materials-v1"
-    assert screen_demo["required_source_materials"] == [
-        "screen_recording_or_terminal_script"
-    ]
+    assert screen_demo["required_source_materials"] == ["screen_recording_or_terminal_script"]
     screen_bundle = client.get("/v1/pipelines/screen-demo/bundle")
     assert screen_bundle.status_code == 200
-    screen_script = next(
-        stage
-        for stage in screen_bundle.json()["manifest"]["stages"]
-        if stage["name"] == "script"
-    )
+    screen_script = next(stage for stage in screen_bundle.json()["manifest"]["stages"] if stage["name"] == "script")
     assert "transcriber" not in screen_script.get("required_tools", [])
     assert "transcriber" in screen_script.get("optional_tools", [])
 
@@ -421,19 +444,25 @@ def test_pipeline_catalog_exposes_platform_contract_readiness(client: TestClient
             "required_source_materials": ["archive_or_stock_source_collection"],
         },
     }
-    for name in ["talking-head", "clip-factory", "podcast-repurpose", "localization-dub"]:
+    for name in [
+        "talking-head",
+        "clip-factory",
+        "podcast-repurpose",
+        "localization-dub",
+    ]:
         assert client.get(f"/v1/pipelines/{name}/bundle").status_code == 200
 
-def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(client: TestClient) -> None:
+
+def test_pipeline_bundle_exposes_manifest_and_stage_director_instructions(
+    client: TestClient,
+) -> None:
     response = client.get("/v1/pipelines/animation/bundle")
     assert response.status_code == 200
     bundle = response.json()
     assert bundle["manifest"]["name"] == "animation"
     assert bundle["stages"]
     assert any(stage["instruction"] for stage in bundle["stages"])
-    assets_stage = next(
-        stage for stage in bundle["manifest"]["stages"] if stage["name"] == "assets"
-    )
+    assets_stage = next(stage for stage in bundle["manifest"]["stages"] if stage["name"] == "assets")
     assert "music_library" in assets_stage["tools_available"]
     assert client.get("/v1/pipelines/../../secrets/bundle").status_code == 404
 
@@ -449,22 +478,40 @@ def test_tenant_isolation_and_invalid_approval_transition(client: TestClient) ->
     assert invalid.status_code == 409
 
 
-def test_approval_is_idempotent_and_render_registers_range_artifact(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_approval_is_idempotent_and_render_registers_range_artifact(client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fixture = tmp_path / "fixture.mp4"
     import subprocess
 
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x14232D:s=320x180:d=0.3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(fixture)],
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x14232D:s=320x180:d=0.3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(fixture),
+        ],
         check=True,
         capture_output=True,
     )
     monkeypatch.setenv("OPENMONTAGE_ENGINE_RENDER_MODE", "fixture-copy")
     monkeypatch.setenv("OPENMONTAGE_ENGINE_FIXTURE_VIDEO", str(fixture))
     job = create(client)
-    body = {"approval_id": job["approval"]["approval_id"], "decision": "approved", "decided_by": "user-1"}
-    first = client.post(f"/v1/jobs/{job['job_id']}/approve", headers={"X-Tenant-ID": "tenant-a"}, json=body)
+    body = {
+        "approval_id": job["approval"]["approval_id"],
+        "decision": "approved",
+        "decided_by": "user-1",
+    }
+    first = client.post(
+        f"/v1/jobs/{job['job_id']}/approve",
+        headers={"X-Tenant-ID": "tenant-a"},
+        json=body,
+    )
     assert first.status_code == 200
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -490,11 +537,17 @@ def test_approval_is_idempotent_and_render_registers_range_artifact(
     assert subtitle_response.headers["content-type"].startswith("application/x-subrip")
     assert "CouncilForge plans" in subtitle_response.text
     assert subtitle["metadata"]["cue_count"] == 1
-    replay = client.post(f"/v1/jobs/{job['job_id']}/approve", headers={"X-Tenant-ID": "tenant-a"}, json=body)
+    replay = client.post(
+        f"/v1/jobs/{job['job_id']}/approve",
+        headers={"X-Tenant-ID": "tenant-a"},
+        json=body,
+    )
     assert replay.status_code == 200
 
 
-def test_action_resolution_cancel_event_sequence_and_restart_recovery(client: TestClient) -> None:
+def test_action_resolution_cancel_event_sequence_and_restart_recovery(
+    client: TestClient,
+) -> None:
     job = create(client)
     stored = client.app.state.store.load_job(job["job_id"])
     assert stored is not None
@@ -559,7 +612,9 @@ def create_workspace(
     return response.json()
 
 
-def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_skill(client: TestClient) -> None:
+def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_skill(
+    client: TestClient,
+) -> None:
     workspace = create_workspace(client)
     replay = client.post(
         "/v1/workspaces",
@@ -594,10 +649,13 @@ def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_sk
         },
     )
     assert conflict.status_code == 409
-    assert client.get(
-        f"/v1/workspaces/{workspace['workspace_id']}",
-        headers={"X-Tenant-ID": "tenant-b"},
-    ).status_code == 404
+    assert (
+        client.get(
+            f"/v1/workspaces/{workspace['workspace_id']}",
+            headers={"X-Tenant-ID": "tenant-b"},
+        ).status_code
+        == 404
+    )
 
     context = client.get(
         f"/v1/workspaces/{workspace['workspace_id']}/stages/assets/context",
@@ -617,9 +675,7 @@ def test_capability_workspace_is_idempotent_tenant_isolated_and_exposes_stage_sk
     assert payload["artifact_schemas"]["asset_manifest"]["title"]
 
 
-def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = create_workspace(client, key="workspace-execution")
     workspace_id = workspace["workspace_id"]
 
@@ -775,9 +831,7 @@ def test_capability_gateway_redacts_provider_errors_from_execution_events(
     monkeypatch.setenv("DASHSCOPE_API_KEY", secret)
 
     def fail_with_secret(_inputs: dict) -> ToolResult:
-        raise RuntimeError(
-            f"Bearer {secret}; api_key={secret}; request failed"
-        )
+        raise RuntimeError(f"Bearer {secret}; api_key={secret}; request failed")
 
     monkeypatch.setattr(diagram, "execute", fail_with_secret)
     submitted = client.post(
@@ -884,9 +938,7 @@ def test_capability_gateway_retries_retryable_tool_results_and_records_attempts(
     assert [event["type"] for event in events].count("execution.retrying") == 2
 
 
-def test_capability_gateway_injects_workspace_local_remotion_paths(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_capability_gateway_injects_workspace_local_remotion_paths(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = create_workspace(client, key="workspace-remotion-defaults")
     workspace_id = workspace["workspace_id"]
 
@@ -927,7 +979,12 @@ def test_capability_gateway_injects_workspace_local_remotion_paths(
                         "end_seconds": 1,
                     }
                 ],
-                "render": {"width": 640, "height": 360, "fps": 24, "duration_seconds": 1},
+                "render": {
+                    "width": 640,
+                    "height": 360,
+                    "fps": 24,
+                    "duration_seconds": 1,
+                },
             },
         },
     )
@@ -949,9 +1006,7 @@ def test_capability_gateway_injects_workspace_local_remotion_paths(
     assert execution["artifacts"][0]["path"].startswith("tool-output/assets/remotion-motion/")
 
 
-def test_capability_gateway_injects_workspace_local_video_compose_output_path(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_capability_gateway_injects_workspace_local_video_compose_output_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = create_workspace(client, key="workspace-video-compose-default")
     workspace_id = workspace["workspace_id"]
 
@@ -1012,9 +1067,7 @@ def test_capability_gateway_injects_workspace_local_video_compose_output_path(
     assert execution["artifacts"][0]["path"] == "renders/final.mp4"
 
 
-def test_capability_gateway_resolves_manifest_paths_inside_workspace(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_capability_gateway_resolves_manifest_paths_inside_workspace(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = create_workspace(client, key="workspace-video-compose-manifest-paths")
     workspace_id = workspace["workspace_id"]
 
@@ -1044,12 +1097,27 @@ def test_capability_gateway_resolves_manifest_paths_inside_workspace(
                 "edit_decisions": {
                     "render_runtime": "remotion",
                     "renderer_family": "explainer-data",
-                    "cuts": [{"id": "cut-1", "source": "image-1", "in_seconds": 0, "out_seconds": 1}],
+                    "cuts": [
+                        {
+                            "id": "cut-1",
+                            "source": "image-1",
+                            "in_seconds": 0,
+                            "out_seconds": 1,
+                        }
+                    ],
                 },
                 "asset_manifest": {
                     "assets": [
-                        {"id": "image-1", "type": "image", "path": "assets/images/scene.png"},
-                        {"id": "subtitle-1", "type": "subtitle", "path": "assets/subtitles/script.srt"},
+                        {
+                            "id": "image-1",
+                            "type": "image",
+                            "path": "assets/images/scene.png",
+                        },
+                        {
+                            "id": "subtitle-1",
+                            "type": "subtitle",
+                            "path": "assets/subtitles/script.srt",
+                        },
                     ]
                 },
             },
@@ -1074,9 +1142,7 @@ def test_capability_gateway_resolves_manifest_paths_inside_workspace(
         assert workspace_id in path.parts
 
 
-def test_capability_gateway_materializes_script_section_subtitles_for_video_compose(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_capability_gateway_materializes_script_section_subtitles_for_video_compose(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = create_workspace(client, key="workspace-video-compose-subtitles")
     workspace_id = workspace["workspace_id"]
 
@@ -1235,7 +1301,9 @@ def test_capability_gateway_materializes_local_music_library_inputs_for_video_co
     assert asset_path.read_bytes() == b"fake-local-music"
 
 
-def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: TestClient) -> None:
+def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(
+    client: TestClient,
+) -> None:
     workspace = create_workspace(client, key="workspace-cancel")
     workspace_id = workspace["workspace_id"]
     foreign = client.post(
@@ -1261,7 +1329,9 @@ def test_capability_workspace_cancel_is_tenant_scoped_and_idempotent(client: Tes
     assert current.json()["status"] == "cancelled"
 
 
-def test_capability_gateway_recovery_records_retryable_failure_event(client: TestClient) -> None:
+def test_capability_gateway_recovery_records_retryable_failure_event(
+    client: TestClient,
+) -> None:
     workspace = create_workspace(client, key="workspace-recovery")
     workspace_id = workspace["workspace_id"]
     gateway = client.app.state.capability_gateway
@@ -1304,7 +1374,9 @@ def test_capability_gateway_recovery_records_retryable_failure_event(client: Tes
     assert gateway.events(workspace_id, "tenant-a")[-1]["type"] == "execution.failed"
 
 
-def test_agent_layer_three_skill_checkpoint_and_workspace_event_sequence(client: TestClient) -> None:
+def test_agent_layer_three_skill_checkpoint_and_workspace_event_sequence(
+    client: TestClient,
+) -> None:
     workspace = create_workspace(client, key="workspace-checkpoint")
     workspace_id = workspace["workspace_id"]
     skill = client.get("/v1/agent-skills/remotion-best-practices")

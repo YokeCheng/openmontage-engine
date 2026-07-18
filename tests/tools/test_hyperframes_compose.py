@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from tools.base_tool import ToolStatus
 from tools.video.hyperframes_compose import HyperFramesCompose
 from tools.video.video_compose import VideoCompose
 
@@ -52,20 +51,13 @@ def test_hyperframes_layer2_skill_names_correct_package():
     A Layer 2 skill reader would get bad advice even after the
     install_instructions fix. Must name the real published package."""
     from pathlib import Path
-    body = (
-        Path(__file__).resolve().parent.parent.parent
-        / "skills" / "core" / "hyperframes.md"
-    ).read_text(encoding="utf-8")
+
+    body = (Path(__file__).resolve().parent.parent.parent / "skills" / "core" / "hyperframes.md").read_text(encoding="utf-8")
     # The dangerous invocation must be called out, not recommended.
     # If `@hyperframes/cli` appears it must be in a warning context.
     if "@hyperframes/cli" in body:
         # Only OK if it's named as a trap, not a recommendation.
-        assert (
-            "404" in body
-            or "NOT" in body
-            or "do not" in body.lower()
-            or "trap" in body.lower()
-        ), (
+        assert "404" in body or "NOT" in body or "do not" in body.lower() or "trap" in body.lower(), (
             "skills/core/hyperframes.md still recommends `@hyperframes/cli` "
             "(the 404-ing monorepo name) without a warning. Replace with "
             "`npx hyperframes` or flag it as a trap."
@@ -88,18 +80,15 @@ def test_animation_proposal_director_has_no_hardcoded_costs_or_keys():
     from pathlib import Path
     import re
 
-    body = (
-        Path(__file__).resolve().parent.parent.parent
-        / "skills" / "pipelines" / "animation" / "proposal-director.md"
-    ).read_text(encoding="utf-8")
+    body = (Path(__file__).resolve().parent.parent.parent / "skills" / "pipelines" / "animation" / "proposal-director.md").read_text(encoding="utf-8")
 
     # Only flag NON-ZERO dollar figures. `$0` and `$0.00` labeling something
     # as free is fine (local tools don't drift in cost), but any real price
     # ($0.05, $3-15, etc.) is drift-prone and must come from estimate_cost.
     dollar_pattern = re.compile(
-        r"\$(?!0(?!\.?\d*[1-9]))"          # dollar sign
-        r"\d+(?:[.,]\d+)?"                  # integer or decimal part
-        r"(?:\s*-\s*\$?\d+(?:[.,]\d+)?)?"   # optional range tail
+        r"\$(?!0(?!\.?\d*[1-9]))"  # dollar sign
+        r"\d+(?:[.,]\d+)?"  # integer or decimal part
+        r"(?:\s*-\s*\$?\d+(?:[.,]\d+)?)?"  # optional range tail
     )
     env_var_pattern = re.compile(
         r"\b(FAL_KEY|OPENAI_API_KEY|RUNWAY_API_KEY|KLING_API_KEY|"
@@ -138,8 +127,7 @@ def test_animation_proposal_director_has_no_hardcoded_costs_or_keys():
             f"provider pricing drifts between releases. Violations:\n{formatted}"
         )
     assert "provider_menu_summary" in body or "estimate_cost" in body, (
-        "Animation proposal-director must reference provider_menu_summary() "
-        "or estimate_cost so agents know where live pricing comes from."
+        "Animation proposal-director must reference provider_menu_summary() or estimate_cost so agents know where live pricing comes from."
     )
 
 
@@ -153,9 +141,7 @@ def test_provider_menu_summary_deduplicates_providers_across_buckets():
     registry.discover()
     s = registry.provider_menu_summary()
     for cap_entry in s["capabilities"]:
-        both = set(cap_entry["available_providers"]) & set(
-            cap_entry["unavailable_providers"]
-        )
+        both = set(cap_entry["available_providers"]) & set(cap_entry["unavailable_providers"])
         assert not both, (
             f"Capability {cap_entry['capability']!r} lists providers in BOTH "
             f"available and unavailable buckets: {sorted(both)}. A provider "
@@ -183,10 +169,7 @@ def test_provider_menu_summary_is_cp1252_safe():
     # And the summary itself is scrubbed.
     registry.discover()
     summary_json = json.dumps(registry.provider_menu_summary())
-    assert "\u2014" not in summary_json, (
-        "em-dash leaked into provider_menu_summary — Windows cp1252 users "
-        "will see mojibake in preflight."
-    )
+    assert "\u2014" not in summary_json, "em-dash leaked into provider_menu_summary — Windows cp1252 users will see mojibake in preflight."
     assert "\u2013" not in summary_json, "en-dash leaked"
     # Nested structures must also be scrubbed.
     nested = _scrub_unicode_dashes({"a": ["x \u2014 y", {"b": "c \u2014 d"}]})
@@ -203,8 +186,7 @@ def test_install_instructions_reference_correct_npm_package_name():
     hint = HyperFramesCompose.install_instructions
     # Must name the correct published package name.
     assert "`npx hyperframes" in hint or "npm package: `hyperframes`" in hint, (
-        "install_instructions must reference `npx hyperframes` / npm package "
-        "`hyperframes` — NOT the monorepo-internal `@hyperframes/cli` name."
+        "install_instructions must reference `npx hyperframes` / npm package `hyperframes` — NOT the monorepo-internal `@hyperframes/cli` name."
     )
     # And ideally warns about the 404 trap so agents don't re-introduce it.
     assert "404" in hint or "@hyperframes/cli" in hint, (
@@ -220,9 +202,7 @@ def test_runtime_check_fails_when_npm_package_unresolvable(monkeypatch):
     when the machine was offline, npm was down, or the package name was wrong.
     The check must now include a real npm resolve."""
     # Clear process cache and force _resolve_npm_package to return a 404.
-    monkeypatch.setattr(
-        HyperFramesCompose, "_npm_resolve_cache", None, raising=False
-    )
+    monkeypatch.setattr(HyperFramesCompose, "_npm_resolve_cache", None, raising=False)
     monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
@@ -230,21 +210,15 @@ def test_runtime_check_fails_when_npm_package_unresolvable(monkeypatch):
     )
     rc = HyperFramesCompose()._runtime_check()
     assert rc["runtime_available"] is False, (
-        "Runtime must report NOT available when the npm package can't be "
-        "resolved — even if node/ffmpeg/npx are all on PATH."
+        "Runtime must report NOT available when the npm package can't be resolved — even if node/ffmpeg/npx are all on PATH."
     )
-    assert any("404" in r for r in rc["reasons"]), (
-        "reasons must include the actual npm-resolve failure, not just a "
-        "generic 'runtime unavailable' message."
-    )
+    assert any("404" in r for r in rc["reasons"]), "reasons must include the actual npm-resolve failure, not just a generic 'runtime unavailable' message."
     assert rc["npm_resolve_error"] is not None
     assert rc["npm_package"] == "hyperframes"
 
 
 def test_runtime_check_succeeds_when_npm_resolves(monkeypatch):
-    monkeypatch.setattr(
-        HyperFramesCompose, "_npm_resolve_cache", None, raising=False
-    )
+    monkeypatch.setattr(HyperFramesCompose, "_npm_resolve_cache", None, raising=False)
     monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
@@ -264,9 +238,7 @@ def test_video_compose_render_engines_follow_hyperframes_runtime_check(monkeypat
     must track the true availability, not just the local-binary floor.
     Without this, the 'Present Both Composition Runtimes' HARD RULE surfaces
     a runtime that cannot actually render."""
-    monkeypatch.setattr(
-        HyperFramesCompose, "_npm_resolve_cache", None, raising=False
-    )
+    monkeypatch.setattr(HyperFramesCompose, "_npm_resolve_cache", None, raising=False)
     monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
@@ -274,8 +246,7 @@ def test_video_compose_render_engines_follow_hyperframes_runtime_check(monkeypat
     )
     info = VideoCompose().get_info()
     assert info["render_engines"]["hyperframes"] is False, (
-        "video_compose must mark hyperframes as unavailable when the real "
-        "runtime check fails. Otherwise the HARD RULE lies."
+        "video_compose must mark hyperframes as unavailable when the real runtime check fails. Otherwise the HARD RULE lies."
     )
 
 
@@ -327,8 +298,7 @@ def test_agent_guide_references_provider_menu_summary():
     root = Path(__file__).resolve().parent.parent.parent
     guide = (root / "AGENT_GUIDE.md").read_text(encoding="utf-8")
     assert "provider_menu_summary" in guide, (
-        "AGENT_GUIDE.md must reference provider_menu_summary() as the primary "
-        "preflight helper — without this, agents fall back to the firehose."
+        "AGENT_GUIDE.md must reference provider_menu_summary() as the primary preflight helper — without this, agents fall back to the firehose."
     )
 
 
@@ -445,25 +415,15 @@ def test_schemas_require_render_runtime():
 
     root = Path(__file__).resolve().parent.parent.parent
 
-    ed = json.loads(
-        (root / "schemas" / "artifacts" / "edit_decisions.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    ed = json.loads((root / "schemas" / "artifacts" / "edit_decisions.schema.json").read_text(encoding="utf-8"))
     assert "render_runtime" in ed["required"], (
-        "edit_decisions.schema.json must require render_runtime — missing means "
-        "governance bypass (silent Remotion fallback)."
+        "edit_decisions.schema.json must require render_runtime — missing means governance bypass (silent Remotion fallback)."
     )
 
-    pp = json.loads(
-        (root / "schemas" / "artifacts" / "proposal_packet.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    pp = json.loads((root / "schemas" / "artifacts" / "proposal_packet.schema.json").read_text(encoding="utf-8"))
     pp_prod = pp["properties"]["production_plan"]
     assert "render_runtime" in pp_prod["required"], (
-        "proposal_packet.production_plan must require render_runtime — "
-        "the proposal stage MUST pick a runtime explicitly."
+        "proposal_packet.production_plan must require render_runtime — the proposal stage MUST pick a runtime explicitly."
     )
 
 
@@ -477,14 +437,28 @@ def test_runtime_swap_detected_flips_when_proposal_packet_disagrees(tmp_path):
     mp4 = tmp_path / "tiny.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "color=c=#000000:s=320x240:d=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-shortest", str(mp4),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#000000:s=320x240:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(mp4),
         ],
-        capture_output=True, check=True, timeout=30,
+        capture_output=True,
+        check=True,
+        timeout=30,
     )
 
     edit_decisions = {
@@ -499,9 +473,7 @@ def test_runtime_swap_detected_flips_when_proposal_packet_disagrees(tmp_path):
         },
     }
 
-    review = VideoCompose()._run_final_review(
-        mp4, edit_decisions, proposal_packet
-    )
+    review = VideoCompose()._run_final_review(mp4, edit_decisions, proposal_packet)
     pp = review["checks"]["promise_preservation"]
     assert pp.get("runtime_swap_detected") is True
     assert "runtime_swap_check" in pp
@@ -516,14 +488,28 @@ def test_runtime_swap_detected_stays_false_when_proposal_matches(tmp_path):
     mp4 = tmp_path / "tiny.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "color=c=#000000:s=320x240:d=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-shortest", str(mp4),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#000000:s=320x240:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(mp4),
         ],
-        capture_output=True, check=True, timeout=30,
+        capture_output=True,
+        check=True,
+        timeout=30,
     )
     edit_decisions = {
         "version": "1.0",
@@ -531,9 +517,7 @@ def test_runtime_swap_detected_stays_false_when_proposal_matches(tmp_path):
         "cuts": [{"id": "c1", "source": "x", "in_seconds": 0, "out_seconds": 2}],
     }
     proposal_packet = {"production_plan": {"render_runtime": "remotion"}}
-    review = VideoCompose()._run_final_review(
-        mp4, edit_decisions, proposal_packet
-    )
+    review = VideoCompose()._run_final_review(mp4, edit_decisions, proposal_packet)
     pp = review["checks"]["promise_preservation"]
     assert pp.get("runtime_swap_detected", False) is False
     assert "ok" in pp["runtime_swap_check"]
@@ -553,14 +537,8 @@ def test_both_runtimes_visible_in_render_engines_when_available():
     info = VideoCompose().get_info()
     engines = info["render_engines"]
     # Both entries must exist as keys regardless of availability.
-    assert "remotion" in engines, (
-        "render_engines dict is missing 'remotion' — agents won't see it as "
-        "an option."
-    )
-    assert "hyperframes" in engines, (
-        "render_engines dict is missing 'hyperframes' — agents won't see it "
-        "as an option and will silently default to Remotion."
-    )
+    assert "remotion" in engines, "render_engines dict is missing 'remotion' — agents won't see it as an option."
+    assert "hyperframes" in engines, "render_engines dict is missing 'hyperframes' — agents won't see it as an option and will silently default to Remotion."
     assert "ffmpeg" in engines
     # Both notes must exist independently so onboarding can surface both.
     assert "remotion_note" in info
@@ -589,17 +567,14 @@ def test_decision_log_accepts_render_runtime_selection_with_both_options():
     must validate. This is the contract the reviewer enforces."""
     import json
     from pathlib import Path
+
     try:
         import jsonschema
     except ImportError:  # pragma: no cover
         pytest.skip("jsonschema not installed")
 
     root = Path(__file__).resolve().parent.parent.parent
-    schema = json.loads(
-        (root / "schemas" / "artifacts" / "decision_log.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    schema = json.loads((root / "schemas" / "artifacts" / "decision_log.schema.json").read_text(encoding="utf-8"))
 
     log = {
         "version": "1.0",
@@ -652,9 +627,9 @@ def test_transcript_comparison_catches_literal_punctuation_leak(tmp_path):
             {"word": "in", "start": 0.9, "end": 1.0},
             {"word": "five", "start": 1.0, "end": 1.3},
             {"word": "minutes", "start": 1.3, "end": 1.7},
-            {"word": "dot", "start": 1.7, "end": 1.9},    # leak!
-            {"word": "dot", "start": 1.9, "end": 2.1},    # leak!
-            {"word": "dot", "start": 2.1, "end": 2.3},    # leak!
+            {"word": "dot", "start": 1.7, "end": 1.9},  # leak!
+            {"word": "dot", "start": 1.9, "end": 2.1},  # leak!
+            {"word": "dot", "start": 2.1, "end": 2.3},  # leak!
             {"word": "what", "start": 2.5, "end": 2.8},
             {"word": "would", "start": 2.8, "end": 3.0},
             {"word": "take", "start": 3.0, "end": 3.3},
@@ -672,7 +647,7 @@ def test_transcript_comparison_catches_literal_punctuation_leak(tmp_path):
             {"word": "years", "start": 7.3, "end": 7.7},
             {"word": "to", "start": 7.7, "end": 7.9},
             {"word": "finish", "start": 7.9, "end": 8.3},
-            {"word": "dot", "start": 8.3, "end": 8.5},    # another leak
+            {"word": "dot", "start": 8.3, "end": 8.5},  # another leak
             {"word": "We", "start": 9.0, "end": 9.2},
             {"word": "may", "start": 9.2, "end": 9.4},
             {"word": "have", "start": 9.4, "end": 9.6},
@@ -689,13 +664,8 @@ def test_transcript_comparison_catches_literal_punctuation_leak(tmp_path):
     result = VideoCompose._compare_transcript_to_script(transcript_path, script_text)
 
     # Must catch the punctuation leak
-    assert result["spurious_punctuation_words"], (
-        "transcript_comparison failed to detect the 'dot' leak from literal ... punctuation."
-    )
-    leak_counts = {
-        entry["word"]: entry["count"]
-        for entry in result["spurious_punctuation_words"]
-    }
+    assert result["spurious_punctuation_words"], "transcript_comparison failed to detect the 'dot' leak from literal ... punctuation."
+    leak_counts = {entry["word"]: entry["count"] for entry in result["spurious_punctuation_words"]}
     assert leak_counts.get("dot") == 4, f"Expected 4 'dot' leaks, got {leak_counts}"
 
     # Must produce a CRITICAL-severity issue message
@@ -765,13 +735,28 @@ def test_run_final_review_includes_transcript_comparison_section(tmp_path):
     mp4 = tmp_path / "out.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "color=c=#000000:s=320x240:d=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest", str(mp4),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#000000:s=320x240:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(mp4),
         ],
-        capture_output=True, check=True, timeout=30,
+        capture_output=True,
+        check=True,
+        timeout=30,
     )
 
     review = VideoCompose()._run_final_review(
@@ -790,6 +775,52 @@ def test_run_final_review_includes_transcript_comparison_section(tmp_path):
     )
     tc = review["checks"]["transcript_comparison"]
     assert any("not provided" in i for i in tc["issues"])
+
+
+def test_final_review_does_not_report_music_for_narration_only_video(tmp_path):
+    """Volume proves an audio stream exists, not which logical layers it contains."""
+    import subprocess
+
+    mp4 = tmp_path / "narration-only.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#14232d:s=320x240:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(mp4),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+    review = VideoCompose()._run_final_review(
+        mp4,
+        edit_decisions={
+            "version": "1.0",
+            "render_runtime": "remotion",
+            "cuts": [{"id": "c1", "source": "x", "in_seconds": 0, "out_seconds": 2}],
+            "audio": {"narration": {"segments": [{"asset_id": "voice-1", "src": "voice.wav", "start_seconds": 0}]}},
+        },
+    )
+
+    audio = review["checks"]["audio_spotcheck"]
+    assert audio["narration_present"] is True
+    assert audio["music_present"] is False
 
 
 def test_hyperframes_root_composition_has_data_start_and_duration(tmp_path):
@@ -826,6 +857,7 @@ def test_hyperframes_root_composition_has_data_start_and_duration(tmp_path):
     assert 'data-start="0"' in html  # per SKILL.md: root composition: use "0"
     # data-duration must match the timeline total; value can be '5' or '5.0' etc.
     import re
+
     m = re.search(r'data-duration="([^"]+)"', html)
     assert m, "root composition missing data-duration"
     assert float(m.group(1)) == pytest.approx(5.0)
@@ -833,16 +865,12 @@ def test_hyperframes_root_composition_has_data_start_and_duration(tmp_path):
     assert 'data-height="1080"' in html
 
 
-def test_video_compose_blocks_hyperframes_when_runtime_unavailable(
-    tmp_path, monkeypatch
-):
+def test_video_compose_blocks_hyperframes_when_runtime_unavailable(tmp_path, monkeypatch):
     """Governance: if render_runtime='hyperframes' is locked but runtime is
     missing, the tool must NOT silently substitute another engine."""
 
     # Force HyperFrames availability to False regardless of the machine state.
-    monkeypatch.setattr(
-        VideoCompose, "_hyperframes_available", lambda self: False, raising=True
-    )
+    monkeypatch.setattr(VideoCompose, "_hyperframes_available", lambda self: False, raising=True)
 
     result = VideoCompose().execute(
         {
@@ -870,15 +898,11 @@ def test_video_compose_blocks_hyperframes_when_runtime_unavailable(
     assert "blocker" in err or "not available" in err
 
 
-def test_video_compose_honors_hyperframes_runtime_before_atelier_mode(
-    tmp_path, monkeypatch
-):
+def test_video_compose_honors_hyperframes_runtime_before_atelier_mode(tmp_path, monkeypatch):
     """Regression for F-14: composition_mode='atelier' must not force the
     Remotion atelier branch when render_runtime='hyperframes' is locked."""
 
-    monkeypatch.setattr(
-        VideoCompose, "_hyperframes_available", lambda self: False, raising=True
-    )
+    monkeypatch.setattr(VideoCompose, "_hyperframes_available", lambda self: False, raising=True)
 
     result = VideoCompose().execute(
         {
@@ -978,13 +1002,13 @@ def test_scaffold_workspace_generates_html_and_assets(tmp_path: Path):
     # HyperFrames authoring contract requirements we MUST emit:
     assert 'data-composition-id="root"' in html
     assert 'window.__timelines["root"]' in html
-    assert 'paused: true' in html
+    assert "paused: true" in html
     assert 'class="clip' in html
     assert "gsap" in html.lower()
 
     # Text card for c2 must carry data-start and data-duration.
     assert 'data-start="3"' in html
-    assert 'Hello HyperFrames' in html
+    assert "Hello HyperFrames" in html
 
     # Image asset was staged into the workspace.
     staged = workspace / "assets" / "hero.png"
@@ -1088,12 +1112,7 @@ def test_style_bridge_edit_decision_override_wins():
 
 
 def test_proposal_packet_schema_accepts_render_runtime():
-    schema_path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "schemas"
-        / "artifacts"
-        / "proposal_packet.schema.json"
-    )
+    schema_path = Path(__file__).resolve().parent.parent.parent / "schemas" / "artifacts" / "proposal_packet.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     props = schema["properties"]["production_plan"]["properties"]
     assert "render_runtime" in props
@@ -1104,33 +1123,19 @@ def test_proposal_packet_schema_accepts_render_runtime():
 def test_schemas_accept_voice_performance_contract():
     root = Path(__file__).resolve().parent.parent.parent
 
-    script_schema = json.loads(
-        (root / "schemas" / "artifacts" / "script.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    script_schema = json.loads((root / "schemas" / "artifacts" / "script.schema.json").read_text(encoding="utf-8"))
     assert "voice_performance" in script_schema["properties"]
     section_props = script_schema["properties"]["sections"]["items"]["properties"]
     assert "delivery_cues" in section_props
     assert "provider_text" in section_props["delivery_cues"]["properties"]
 
-    proposal_schema = json.loads(
-        (root / "schemas" / "artifacts" / "proposal_packet.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    voice_selection = proposal_schema["properties"]["production_plan"]["properties"][
-        "voice_selection"
-    ]["properties"]
+    proposal_schema = json.loads((root / "schemas" / "artifacts" / "proposal_packet.schema.json").read_text(encoding="utf-8"))
+    voice_selection = proposal_schema["properties"]["production_plan"]["properties"]["voice_selection"]["properties"]
     assert "delivery_style" in voice_selection
     assert "pacing_policy" in voice_selection
     assert "sample_approval_required" in voice_selection
 
-    asset_schema = json.loads(
-        (root / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    asset_schema = json.loads((root / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text(encoding="utf-8"))
     asset_props = asset_schema["properties"]["assets"]["items"]["properties"]
     assert "voice_performance" in asset_props
     assert "provider_settings" in asset_props["voice_performance"]["properties"]
@@ -1149,28 +1154,25 @@ def test_tts_provider_contracts_match_supported_fields():
 
     openai_props = OpenAITTS.input_schema["properties"]
     assert "response_format" in openai_props
-    assert {"mp3", "opus", "aac", "flac", "wav", "pcm"}.issubset(
-        set(openai_props["response_format"]["enum"])
-    )
+    assert {"mp3", "opus", "aac", "flac", "wav", "pcm"}.issubset(set(openai_props["response_format"]["enum"]))
     assert OpenAITTS._supports_instructions("gpt-4o-mini-tts")
     assert not OpenAITTS._supports_instructions("tts-1")
     assert not OpenAITTS._supports_instructions("tts-1-hd")
 
     eleven_props = ElevenLabsTTS.input_schema["properties"]
-    assert {"stability", "similarity_boost", "style", "speed", "use_speaker_boost"}.issubset(
-        set(eleven_props)
-    )
+    assert {
+        "stability",
+        "similarity_boost",
+        "style",
+        "speed",
+        "use_speaker_boost",
+    }.issubset(set(eleven_props))
     assert eleven_props["speed"]["minimum"] == 0.7
     assert eleven_props["speed"]["maximum"] == 1.2
 
 
 def test_edit_decisions_schema_accepts_render_runtime():
-    schema_path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "schemas"
-        / "artifacts"
-        / "edit_decisions.schema.json"
-    )
+    schema_path = Path(__file__).resolve().parent.parent.parent / "schemas" / "artifacts" / "edit_decisions.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     assert "render_runtime" in schema["properties"]
     assert schema["properties"]["render_runtime"]["enum"] == [
@@ -1181,31 +1183,17 @@ def test_edit_decisions_schema_accepts_render_runtime():
 
 
 def test_final_review_tracks_runtime_and_swap():
-    schema_path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "schemas"
-        / "artifacts"
-        / "final_review.schema.json"
-    )
+    schema_path = Path(__file__).resolve().parent.parent.parent / "schemas" / "artifacts" / "final_review.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    pp = schema["properties"]["checks"]["properties"]["promise_preservation"][
-        "properties"
-    ]
+    pp = schema["properties"]["checks"]["properties"]["promise_preservation"]["properties"]
     assert "render_runtime_used" in pp
     assert "runtime_swap_detected" in pp
 
 
 def test_decision_log_has_render_runtime_category():
-    schema_path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "schemas"
-        / "artifacts"
-        / "decision_log.schema.json"
-    )
+    schema_path = Path(__file__).resolve().parent.parent.parent / "schemas" / "artifacts" / "decision_log.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    category_enum = schema["properties"]["decisions"]["items"]["properties"][
-        "category"
-    ]["enum"]
+    category_enum = schema["properties"]["decisions"]["items"]["properties"]["category"]["enum"]
     assert "render_runtime_selection" in category_enum
 
 

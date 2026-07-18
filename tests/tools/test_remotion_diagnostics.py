@@ -21,7 +21,10 @@ from tools.video.video_compose import VideoCompose  # noqa: E402
 
 @pytest.fixture
 def tool(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/npx")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name, path=None: "/project/node_modules/.bin/remotion" if name == "remotion" else f"/usr/bin/{name}",
+    )
     return VideoCompose()
 
 
@@ -32,9 +35,7 @@ def test_render_failure_surfaces_remotion_stderr_tail(tool, tmp_path, monkeypatc
         raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output="", stderr=stderr)
 
     monkeypatch.setattr(tool, "run_command", fake_run_command)
-    result = tool._remotion_render(
-        {"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")}
-    )
+    result = tool._remotion_render({"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")})
 
     assert result.success is False
     assert "exit 1" in result.error
@@ -46,9 +47,7 @@ def test_timeout_expired_gives_actionable_message(tool, tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=600)
 
     monkeypatch.setattr(tool, "run_command", fake_run_command)
-    result = tool._remotion_render(
-        {"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")}
-    )
+    result = tool._remotion_render({"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")})
 
     assert result.success is False
     assert "timed out" in result.error.lower()
@@ -120,9 +119,24 @@ def test_no_timeout_flag_when_not_requested(tool, tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(tool, "run_command", fake_run_command)
-    tool._remotion_render(
-        {"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")}
-    )
+    tool._remotion_render({"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")})
 
     assert not any(str(c).startswith("--timeout") for c in seen["cmd"])
     assert seen["timeout"] == 600
+
+
+def test_render_uses_repository_local_remotion_cli(tool, tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_command(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return None
+
+    monkeypatch.setattr(tool, "run_command", fake_run_command)
+    tool._remotion_render({"composition_data": {"cuts": []}, "output_path": str(tmp_path / "out.mp4")})
+
+    assert seen["cmd"][:2] == [
+        "/project/node_modules/.bin/remotion",
+        "render",
+    ]
+    assert "npx" not in seen["cmd"]
