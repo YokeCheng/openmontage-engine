@@ -116,6 +116,9 @@ class CreateToolExecutionRequest(BaseModel):
     stage: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     tool_name: str = Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
     inputs: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    platform_job_id: str | None = Field(default=None, min_length=1, max_length=128)
+    stage_attempt: int = Field(default=1, ge=1, le=1000)
 
 
 class WriteWorkspaceCheckpointRequest(BaseModel):

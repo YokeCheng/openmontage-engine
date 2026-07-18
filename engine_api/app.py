@@ -508,6 +508,9 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 stage_name=body.stage,
                 tool_name=body.tool_name,
                 inputs=body.inputs,
+                trace_id=body.trace_id,
+                platform_job_id=body.platform_job_id,
+                stage_attempt=body.stage_attempt,
             )
         except KeyError as exc:
             return problem(404, "Capability not found", str(exc.args[0]), str(exc.args[0]), request)

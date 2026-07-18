@@ -40,6 +40,14 @@ OpenMontage Engine 是异步视频执行引擎，不是第二个 Agent 大脑。
 - `POST /v1/workspaces/{workspace_id}/cancel`：取消工作区及其活动工具执行；
 - `GET /v1/workspaces/{workspace_id}/artifacts`：读取产物索引；内容接口支持 HTTP Range。
 
+工具执行请求除 `stage`、`tool_name` 和 `inputs` 外，还接受三个可选的宿主追踪字段：
+
+- `trace_id`：CouncilForge 端到端追踪号；
+- `platform_job_id`：CouncilForge PostgreSQL Job ID；
+- `stage_attempt`：当前 Pipeline 阶段 attempt，从 1 开始。
+
+它们不参与工具输入，也不会传给供应商；OpenMontage 将其与 `workspace_id`、`execution_id`、`stage`、`tool_name` 和 `provider` 一起写入执行快照及 queued、started、终态事件。终态事件补充 `duration_seconds`、`cost_usd`、`model`、`error_code` 和已脱敏的 `error_message`，供 CouncilForge 幂等回流 PostgreSQL。
+
 完成或待审批 Checkpoint 必须包含该阶段声明的全部标准产物，并通过 `schemas/artifacts/` 中的 JSON Schema。工具文件路径只能位于对应 Workspace；HTTP、HTTPS 和 data URL 可作为远程输入，但不会被解释为本地路径。
 
 v1 协议必须满足：
@@ -337,6 +345,7 @@ CouncilForge 必须在创建任务前查询或缓存这些信息，避免提交�
 - 任务目录、对象存储前缀、事件和查询均以 `tenant_id/job_id` 隔离；
 - 输入路径不得允许目录穿越，外部 URL 必须经过协议、域名、大小和超时限制；
 - 日志、事件和错误统一执行密钥与个人信息脱敏；
+- Tool 输入、Prompt 和凭证不得写入结构化执行日志；Bearer/Basic 凭证、敏感键值、当前进程敏感环境变量和签名 URL 必须在事件或错误落盘前替换；
 - 临时凭证最小权限、短时有效、只写、不可查询；
 - 引擎不得自行调用通用 LLM 进行需求理解或业务决策。
 

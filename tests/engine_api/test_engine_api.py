@@ -636,6 +636,9 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
                 "nested": {"api_token": "must-not-persist"},
             },
             artifacts=[str(output)],
+            cost_usd=0.125,
+            duration_seconds=1.75,
+            model="diagram-test-v1",
         )
 
     monkeypatch.setattr(diagram, "execute", fake_execute)
@@ -676,6 +679,9 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
         json={
             "stage": "assets",
             "tool_name": "diagram_gen",
+            "trace_id": "trace-video-001",
+            "platform_job_id": "job-video-001",
+            "stage_attempt": 2,
             "inputs": {
                 "diagram_type": "boxes",
                 "boxes": [{"label": "CouncilForge"}, {"label": "OpenMontage"}],
@@ -695,6 +701,10 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
             break
         time.sleep(0.02)
     assert execution["status"] == "succeeded"
+    assert execution["trace_id"] == "trace-video-001"
+    assert execution["platform_job_id"] == "job-video-001"
+    assert execution["stage_attempt"] == 2
+    assert execution["provider"] == "mermaid"
     assert execution["artifacts"]
     assert execution["artifacts"][0]["checksum"]
     assert "metadata" in execution["artifacts"][0]
@@ -704,6 +714,22 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
     assert "Signature=" not in persisted_result
     assert execution["result"]["data"]["audio_url"] == "[redacted-signed-url]"
     assert execution["result"]["data"]["nested"]["api_token"] == "[redacted]"
+    assert execution["result"]["cost_usd"] == 0.125
+    assert execution["result"]["duration_seconds"] == 1.75
+    events = client.get(
+        f"/v1/workspaces/{workspace_id}/events",
+        headers={"X-Tenant-ID": "tenant-a"},
+    ).json()["events"]
+    completed = next(event for event in events if event["type"] == "execution.succeeded")
+    assert completed["trace_id"] == "trace-video-001"
+    assert completed["platform_job_id"] == "job-video-001"
+    assert completed["stage"] == "assets"
+    assert completed["stage_attempt"] == 2
+    assert completed["execution_id"] == execution_id
+    assert completed["tool_name"] == "diagram_gen"
+    assert completed["provider"] == "mermaid"
+    assert completed["data"]["cost_usd"] == 0.125
+    assert completed["data"]["duration_seconds"] == 1.75
     artifact_id = execution["artifacts"][0]["artifact_id"]
     ranged = client.get(
         f"/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content",
@@ -727,6 +753,64 @@ def test_capability_gateway_executes_only_stage_tools_and_serves_artifacts(
     )
     assert replay.status_code == 200
     assert replay.json()["execution_id"] == execution_id
+
+
+def test_capability_gateway_redacts_provider_errors_from_execution_events(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = create_workspace(client, key="workspace-redacted-error")
+    workspace_id = workspace["workspace_id"]
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
+    diagram = registry.get("diagram_gen")
+    assert diagram is not None
+    secret = "provider-secret-must-never-persist"
+    monkeypatch.setenv("DASHSCOPE_API_KEY", secret)
+
+    def fail_with_secret(_inputs: dict) -> ToolResult:
+        raise RuntimeError(
+            f"Bearer {secret}; api_key={secret}; request failed"
+        )
+
+    monkeypatch.setattr(diagram, "execute", fail_with_secret)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/executions",
+        headers=headers(key="redacted-failure"),
+        json={
+            "stage": "assets",
+            "tool_name": "diagram_gen",
+            "trace_id": "trace-redacted-error",
+            "platform_job_id": "job-redacted-error",
+            "stage_attempt": 3,
+            "inputs": {"output_path": "assets/images/failure.png"},
+        },
+    )
+    assert submitted.status_code == 202
+    execution_id = submitted.json()["execution_id"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        execution = client.get(
+            f"/v1/workspaces/{workspace_id}/executions/{execution_id}",
+            headers={"X-Tenant-ID": "tenant-a"},
+        ).json()
+        if execution["status"] == "failed":
+            break
+        time.sleep(0.02)
+    events = client.get(
+        f"/v1/workspaces/{workspace_id}/events",
+        headers={"X-Tenant-ID": "tenant-a"},
+    ).json()["events"]
+    persisted = json.dumps({"execution": execution, "events": events})
+    assert secret not in persisted
+    assert "[redacted]" in persisted
+    failed = events[-1]
+    assert failed["type"] == "execution.failed"
+    assert failed["trace_id"] == "trace-redacted-error"
+    assert failed["platform_job_id"] == "job-redacted-error"
+    assert failed["stage_attempt"] == 3
+    assert failed["data"]["error_code"] == "TOOL_EXCEPTION"
 
 
 def test_capability_gateway_injects_workspace_local_remotion_paths(

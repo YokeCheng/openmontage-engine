@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
@@ -28,6 +31,8 @@ from lib.pipeline_loader import load_pipeline_readonly
 from tools.tool_registry import registry
 
 from .store import canonical_digest, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 ACTIVE_EXECUTION_STATES = {"queued", "running", "cancel_requested"}
@@ -88,9 +93,30 @@ def _sanitize_persisted_result(value: Any) -> Any:
         return [_sanitize_persisted_result(item) for item in value]
     if isinstance(value, tuple):
         return [_sanitize_persisted_result(item) for item in value]
-    if isinstance(value, str) and _is_signed_url(value):
-        return "[redacted-signed-url]"
+    if isinstance(value, str):
+        if _is_signed_url(value):
+            return "[redacted-signed-url]"
+        return _redact_sensitive_text(value)
     return value
+
+
+def _redact_sensitive_text(value: str) -> str:
+    """Redact credentials from provider errors before persistence or logging."""
+
+    redacted = re.sub(
+        r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+        r"\1 [redacted]",
+        value,
+    )
+    redacted = re.sub(
+        r"(?i)(api[_-]?key|access[_-]?token|secret|password)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2[redacted]",
+        redacted,
+    )
+    for key, secret in os.environ.items():
+        if _is_sensitive_result_key(key) and secret and len(secret) >= 6:
+            redacted = redacted.replace(secret, "[redacted]")
+    return redacted[:2000]
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -650,6 +676,9 @@ class CapabilityGateway:
         stage_name: str,
         tool_name: str,
         inputs: dict[str, Any],
+        trace_id: str | None = None,
+        platform_job_id: str | None = None,
+        stage_attempt: int = 1,
     ) -> tuple[dict[str, Any], bool]:
         workspace = self.load_workspace(workspace_id, tenant_id)
         if workspace is None:
@@ -672,6 +701,12 @@ class CapabilityGateway:
         workspace_dir = self._workspace_dir(workspace_id)
         inputs_with_defaults = self._workspace_default_inputs(workspace_dir, stage_name, tool_name, inputs)
         normalized_inputs = self._normalize_inputs(workspace_dir, inputs_with_defaults)
+        effective_trace_id = str(trace_id or workspace.get("request_id") or workspace_id)
+        effective_job_id = str(
+            platform_job_id
+            or (workspace.get("metadata") or {}).get("platform_job_id")
+            or ""
+        ) or None
         execution_dir = workspace_dir / "executions"
         index_path = execution_dir / "idempotency.json"
         digest = canonical_digest({"stage": stage_name, "tool_name": tool_name, "inputs": normalized_inputs})
@@ -693,6 +728,10 @@ class CapabilityGateway:
                 "pipeline": workspace["pipeline"],
                 "stage": stage_name,
                 "tool_name": tool_name,
+                "provider": str(tool.provider or "unknown"),
+                "trace_id": effective_trace_id,
+                "platform_job_id": effective_job_id,
+                "stage_attempt": stage_attempt,
                 "status": "queued",
                 "inputs_digest": digest,
                 "result": None,
@@ -706,7 +745,20 @@ class CapabilityGateway:
             _atomic_json(execution_dir / f"{execution_id}.json", execution)
             index[idempotency_key] = {"execution_id": execution_id, "digest": digest}
             _atomic_json(index_path, index)
-            self._append_event(workspace_id, tenant_id, "execution.queued", {"execution_id": execution_id, "stage": stage_name, "tool_name": tool_name})
+            self._append_event(
+                workspace_id,
+                tenant_id,
+                "execution.queued",
+                {
+                    "execution_id": execution_id,
+                    "stage": stage_name,
+                    "stage_attempt": stage_attempt,
+                    "tool_name": tool_name,
+                    "provider": str(tool.provider or "unknown"),
+                    "trace_id": effective_trace_id,
+                    "platform_job_id": effective_job_id,
+                },
+            )
             future = self._executor.submit(self._run_execution, execution_id, workspace_id, tenant_id, tool_name, normalized_inputs)
             self._futures[execution_id] = future
             future.add_done_callback(lambda _: self._futures.pop(execution_id, None))
@@ -765,10 +817,21 @@ class CapabilityGateway:
 
     def _run_execution(self, execution_id: str, workspace_id: str, tenant_id: str, tool_name: str, inputs: dict[str, Any]) -> None:
         execution = self.get_execution(workspace_id, tenant_id, execution_id)
+        started_monotonic = time.monotonic()
         execution["status"] = "running"
         execution["started_at"] = utc_now()
         self._save_execution(execution)
-        self._append_event(workspace_id, tenant_id, "execution.started", {"execution_id": execution_id, "tool_name": tool_name})
+        context = {
+            "execution_id": execution_id,
+            "stage": execution.get("stage"),
+            "stage_attempt": execution.get("stage_attempt"),
+            "tool_name": tool_name,
+            "provider": execution.get("provider"),
+            "trace_id": execution.get("trace_id"),
+            "platform_job_id": execution.get("platform_job_id"),
+        }
+        self._append_event(workspace_id, tenant_id, "execution.started", context)
+        logger.info("openmontage_tool_execution %s", json.dumps({**context, "status": "running"}, sort_keys=True))
         try:
             tool = registry.get(tool_name)
             if tool is None:
@@ -779,7 +842,21 @@ class CapabilityGateway:
                 current["status"] = "cancelled"
                 current["finished_at"] = utc_now()
                 self._save_execution(current)
-                self._append_event(workspace_id, tenant_id, "execution.cancelled", {"execution_id": execution_id})
+                cancelled = {
+                    **context,
+                    "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+                    "cost_usd": 0.0,
+                }
+                self._append_event(
+                    workspace_id,
+                    tenant_id,
+                    "execution.cancelled",
+                    cancelled,
+                )
+                logger.info(
+                    "openmontage_tool_execution %s",
+                    json.dumps({**cancelled, "status": "cancelled"}, sort_keys=True),
+                )
                 return
             artifact_role = "final" if current.get("stage") in {"compose", "publish"} else "intermediate"
             artifacts = [
@@ -796,17 +873,53 @@ class CapabilityGateway:
                 "model": result.model,
             }
             current["artifacts"] = artifacts
-            current["error"] = None if result.success else {"code": "TOOL_FAILED", "message": result.error or "Tool execution failed", "retryable": True}
+            elapsed = max(0.0, time.monotonic() - started_monotonic)
+            current["error"] = None if result.success else {
+                "code": "TOOL_FAILED",
+                "message": _redact_sensitive_text(result.error or "Tool execution failed"),
+                "retryable": True,
+            }
             current["finished_at"] = utc_now()
             self._save_execution(current)
-            self._append_event(workspace_id, tenant_id, f"execution.{current['status']}", {"execution_id": execution_id, "tool_name": tool_name, "artifact_count": len(artifacts)})
+            completion = {
+                **context,
+                "artifact_count": len(artifacts),
+                "cost_usd": float(result.cost_usd or 0),
+                "duration_seconds": float(result.duration_seconds or elapsed),
+                "model": result.model,
+                "error_code": current["error"]["code"] if current["error"] else None,
+                "error_message": current["error"]["message"] if current["error"] else None,
+            }
+            self._append_event(
+                workspace_id,
+                tenant_id,
+                f"execution.{current['status']}",
+                completion,
+            )
+            logger.info(
+                "openmontage_tool_execution %s",
+                json.dumps({**completion, "status": current["status"]}, sort_keys=True),
+            )
         except Exception as exc:
+            message = _redact_sensitive_text(str(exc) or type(exc).__name__)
+            elapsed = max(0.0, time.monotonic() - started_monotonic)
             current = self.get_execution(workspace_id, tenant_id, execution_id)
             current["status"] = "failed"
-            current["error"] = {"code": "TOOL_EXCEPTION", "message": str(exc), "retryable": True}
+            current["error"] = {"code": "TOOL_EXCEPTION", "message": message, "retryable": True}
             current["finished_at"] = utc_now()
             self._save_execution(current)
-            self._append_event(workspace_id, tenant_id, "execution.failed", {"execution_id": execution_id, "tool_name": tool_name, "error": str(exc)[:500]})
+            failure = {
+                **context,
+                "error_code": "TOOL_EXCEPTION",
+                "error_message": message,
+                "duration_seconds": elapsed,
+                "cost_usd": 0.0,
+            }
+            self._append_event(workspace_id, tenant_id, "execution.failed", failure)
+            logger.warning(
+                "openmontage_tool_execution %s",
+                json.dumps({**failure, "status": "failed"}, sort_keys=True),
+            )
         finally:
             # The done callback owns cleanup. Keeping it there also covers a
             # worker that completes before create_execution stores the future.
@@ -823,7 +936,21 @@ class CapabilityGateway:
         else:
             execution["status"] = "cancel_requested"
         self._save_execution(execution)
-        self._append_event(workspace_id, tenant_id, "execution.cancel_requested", {"execution_id": execution_id})
+        self._append_event(
+            workspace_id,
+            tenant_id,
+            "execution.cancelled" if execution["status"] == "cancelled" else "execution.cancel_requested",
+            {
+                "execution_id": execution_id,
+                "stage": execution.get("stage"),
+                "stage_attempt": execution.get("stage_attempt"),
+                "tool_name": execution.get("tool_name"),
+                "provider": execution.get("provider"),
+                "trace_id": execution.get("trace_id"),
+                "platform_job_id": execution.get("platform_job_id"),
+                "cost_usd": 0.0,
+            },
+        )
         return execution
 
     def cancel_workspace(self, workspace_id: str, tenant_id: str) -> dict[str, Any]:
@@ -917,15 +1044,25 @@ class CapabilityGateway:
     def _append_event(self, workspace_id: str, tenant_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             events = self.events(workspace_id, tenant_id)
+            workspace = self.load_workspace(workspace_id, tenant_id) or {}
+            metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
+            safe_data = _sanitize_persisted_result(data)
             event = {
                 "schema_version": "1.0",
                 "event_id": _safe_id("event"),
                 "workspace_id": workspace_id,
                 "tenant_id": tenant_id,
+                "trace_id": str(safe_data.get("trace_id") or workspace.get("request_id") or workspace_id),
+                "platform_job_id": safe_data.get("platform_job_id") or metadata.get("platform_job_id"),
+                "execution_id": safe_data.get("execution_id"),
+                "stage": safe_data.get("stage"),
+                "stage_attempt": safe_data.get("stage_attempt"),
+                "tool_name": safe_data.get("tool_name"),
+                "provider": safe_data.get("provider"),
                 "sequence": len(events) + 1,
                 "type": event_type,
                 "occurred_at": utc_now(),
-                "data": data,
+                "data": safe_data,
             }
             path = self._events_path(workspace_id)
             with path.open("a", encoding="utf-8") as handle:
