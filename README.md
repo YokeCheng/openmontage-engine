@@ -55,7 +55,7 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 .venv/bin/python -m uvicorn engine_api.app:app --host 127.0.0.1 --port 8100
 ```
 
-API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/jobs` 接收平台已批准的清单并异步执行真实媒体工具，`/v1/workspaces` 继续提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。任务媒体只通过当前 Job 的 Remotion `public-dir` 提供，绝不把宿主绝对路径交给浏览器渲染器。`animated-explainer` 按已批准分镜逐段调用真实 TTS，并把每段音频放入对应时间线；每段均先用 FFprobe 校验时长，轻度超长时 FFmpeg `atempo` 会在安全范围内保留全部文案并适配镜头，原始时长、适配时长、倍率和时间区间进入产物元数据，严重超长则明确失败而不是静默截断。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
+API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/jobs` 接收平台已批准的清单并异步执行真实媒体工具，`/v1/workspaces` 继续提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。任务媒体只通过当前 Job 的 Remotion `public-dir` 提供，绝不把宿主绝对路径交给浏览器渲染器。`animated-explainer` 按已批准分镜并发调用最多三路真实 TTS，并把每段音频放入对应时间线；安全收据让失败重试复用已完成音频，避免重复调用和重复计费。每段均先用 FFprobe 校验时长，轻度超长时 FFmpeg `atempo` 会在安全范围内保留全部文案并适配镜头，原始时长、适配时长、倍率和时间区间进入产物元数据，严重超长则明确失败而不是静默截断。最终质检覆盖时长、分辨率、编码、音频流、黑帧、静音、字幕安全区和产物完整性。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
 
 OpenMontage 是传输和产物契约的事实源。FastAPI 生成的规范 OpenAPI 提交在 `schemas/api/engine_api.openapi.json`，版本、操作集合和全部 Schema 摘要提交在 `schemas/api/engine_api.contract.json`。修改公共路由、请求模型或产物 Schema 后必须重新导出并运行 stale check：
 

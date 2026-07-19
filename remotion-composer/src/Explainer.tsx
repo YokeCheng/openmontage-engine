@@ -305,6 +305,8 @@ interface NarrationSegment {
 interface AudioConfig {
   narration?: AudioLayer & { segments?: NarrationSegment[] };
   music?: AudioLayer & {
+    /** Music volume while an approved narration segment is active. */
+    duckingVolume?: number;
     fadeInSeconds?: number;
     fadeOutSeconds?: number;
     /** Start playback from this offset in seconds (skip quiet intros).
@@ -878,12 +880,22 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
           loopVolumeCurveBehavior="repeat"
           volume={(f) => {
             const baseVol = audio.music!.volume ?? 0.1;
+            const seconds = f / fps;
+            const narrationActive = Boolean(
+              audio.narration?.segments?.some((segment) =>
+                seconds >= (segment.start_seconds ?? 0) &&
+                (segment.end_seconds == null || seconds < segment.end_seconds),
+              ),
+            );
+            const effectiveVolume = narrationActive
+              ? (audio.music!.duckingVolume ?? baseVol * 0.4)
+              : baseVol;
             const fadeInDur = (audio.music!.fadeInSeconds ?? 2) * fps;
             const fadeOutDur = (audio.music!.fadeOutSeconds ?? 3) * fps;
             const totalFrames = durationInFrames;
 
             // Fade in
-            const fadeIn = interpolate(f, [0, fadeInDur], [0, baseVol], {
+            const fadeIn = interpolate(f, [0, fadeInDur], [0, effectiveVolume], {
               extrapolateLeft: "clamp",
               extrapolateRight: "clamp",
             });
@@ -891,7 +903,7 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
             const fadeOut = interpolate(
               f,
               [totalFrames - fadeOutDur, totalFrames],
-              [baseVol, 0],
+              [effectiveVolume, 0],
               { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
             );
             return Math.min(fadeIn, fadeOut);

@@ -12,10 +12,12 @@ from fastapi.testclient import TestClient
 from engine_api.app import create_app
 from engine_api.renderer import (
     MediaActionRequired,
+    _apply_bound_source_inputs,
     _fit_audio_to_timeline,
     _materialize_media,
     _media_artifact_metadata,
     _public_asset_src,
+    _quality_report,
     _render_contract,
 )
 from engine_api.store import EngineStore, new_id, utc_now
@@ -117,6 +119,53 @@ def test_real_tts_artifact_metadata_includes_ffprobe_audio_details(tmp_path: Pat
     assert 0.2 <= metadata["duration_seconds"] <= 0.4
 
 
+def test_quality_report_rejects_black_and_silent_narrated_delivery(tmp_path: Path) -> None:
+    import subprocess
+
+    output = tmp_path / "black-silent.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=640x360:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-pix_fmt",
+            "yuv420p",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    payload = manifest()
+    payload["audio"] = {"voice": "dashscope", "music": "none", "subtitles": True}
+    report = _quality_report(
+        output,
+        payload,
+        {
+            "captionStyle": {
+                "wordsPerPage": 1,
+                "fontSize": 42,
+                "maxWidthPercent": 72,
+                "bottomMarginPercent": 6,
+            }
+        },
+    )
+
+    assert report["status"] == "failed"
+    assert {"black_frames", "silence"}.issubset(report["failed_checks"])
+
+
 def test_remotion_media_is_served_from_the_tenant_job_public_directory(tmp_path: Path) -> None:
     public_dir = tmp_path / "job-a"
     narration = public_dir / "assets" / "narration.wav"
@@ -177,12 +226,16 @@ def test_real_tts_is_materialized_per_scene_on_the_approved_timeline(
     class FakeTtsSelector:
         def __init__(self) -> None:
             self.inputs: list[dict] = []
+            self.parallel_gate = threading.Barrier(2)
 
         def get_status(self) -> Available:
             return Available()
 
         def execute(self, inputs: dict) -> ToolResult:
             self.inputs.append(inputs)
+            # Both requests must enter the provider concurrently. A sequential
+            # implementation times out here and fails this regression test.
+            self.parallel_gate.wait(timeout=1)
             output = Path(inputs["output_path"])
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(b"RIFF-per-scene")
@@ -248,7 +301,7 @@ def test_real_tts_is_materialized_per_scene_on_the_approved_timeline(
         {"job_id": "job-scene-audio"},
     )
 
-    assert [item["text"] for item in fake.inputs] == ["第一句。", "第二句。"]
+    assert {item["text"] for item in fake.inputs} == {"第一句。", "第二句。"}
     assert props["audio"]["narration"]["segments"] == [
         {
             "src": "assets/narration-01.wav",
@@ -264,6 +317,19 @@ def test_real_tts_is_materialized_per_scene_on_the_approved_timeline(
         },
     ]
     assert [asset["metadata"]["scene_id"] for asset in assets] == ["scene-01", "scene-02"]
+
+    retry_props: dict = {"cuts": [{}, {}], "audio": {}}
+    retry_assets = _materialize_media(
+        payload,
+        retry_props,
+        tmp_path / "job" / "assets",
+        EngineStore(tmp_path / "runtime-retry"),
+        {"job_id": "job-scene-audio-retry"},
+    )
+
+    assert len(fake.inputs) == 2
+    assert [asset["cost_usd"] for asset in retry_assets] == [0.001, 0.001]
+    assert (tmp_path / "job" / "assets" / "narration-01.receipt.json").is_file()
 
 
 def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -419,7 +485,7 @@ def test_platform_managed_job_skips_duplicate_engine_approval(client: TestClient
             "-f",
             "lavfi",
             "-i",
-            "color=c=0x14232D:s=320x180:d=0.3",
+            "color=c=0x14232D:s=640x360:d=1",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -441,6 +507,208 @@ def test_platform_managed_job_skips_duplicate_engine_approval(client: TestClient
     assert job["approval"] is None
     assert job["execution_mode"] == "platform_managed"
     assert job["status"] in {"running", "rendering", "succeeded"}
+
+
+def test_platform_managed_job_accepts_verified_deferred_source_inputs(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    asset_id = "asset_1234567890abcdef1234567890abcdef"
+    payload = b"approved-logo-bytes"
+    checksum = hashlib.sha256(payload).hexdigest()
+    body = request_body(execution_mode="platform_managed")
+    body["defer_start"] = True
+    body["input"]["source_materials"] = [
+        {
+            "platform_asset_id": asset_id,
+            "filename": "brand-logo.png",
+            "media_type": "image/png",
+            "checksum_sha256": checksum,
+        }
+    ]
+    body["input"]["scenes"][0]["visual"]["asset_id"] = asset_id
+    created = client.post(
+        "/v1/jobs",
+        json=body,
+        headers=headers(key="deferred-input"),
+    )
+    assert created.status_code == 202
+    job = created.json()
+    assert job["status"] == "created"
+    assert job["stage"] == "inputs"
+
+    missing = client.post(
+        f"/v1/jobs/{job['job_id']}/start",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert missing.status_code == 409
+    assert missing.json()["error_code"] == "SOURCE_INPUTS_MISSING"
+    assert client.put(
+        f"/v1/jobs/{job['job_id']}/inputs/{asset_id}",
+        headers={
+            "X-Tenant-ID": "tenant-b",
+            "X-File-Name": "brand-logo.png",
+            "X-Content-SHA256": checksum,
+            "Content-Type": "image/png",
+        },
+        content=payload,
+    ).status_code == 404
+    mismatch = client.put(
+        f"/v1/jobs/{job['job_id']}/inputs/{asset_id}",
+        headers={
+            "X-Tenant-ID": "tenant-a",
+            "X-File-Name": "brand-logo.png",
+            "X-Content-SHA256": "0" * 64,
+            "Content-Type": "image/png",
+        },
+        content=payload,
+    )
+    assert mismatch.status_code == 422
+    assert mismatch.json()["error_code"] == "SOURCE_INPUT_CHECKSUM_MISMATCH"
+
+    uploaded = client.put(
+        f"/v1/jobs/{job['job_id']}/inputs/{asset_id}",
+        headers={
+            "X-Tenant-ID": "tenant-a",
+            "X-File-Name": "brand-logo.png",
+            "X-Content-SHA256": checksum,
+            "Content-Type": "image/png",
+        },
+        content=payload,
+    )
+    assert uploaded.status_code == 201
+    assert "storage_name" not in uploaded.json()
+    replay = client.put(
+        f"/v1/jobs/{job['job_id']}/inputs/{asset_id}",
+        headers={
+            "X-Tenant-ID": "tenant-a",
+            "X-File-Name": "brand-logo.png",
+            "X-Content-SHA256": checksum,
+            "Content-Type": "image/png",
+        },
+        content=payload,
+    )
+    assert replay.status_code == 200
+    monkeypatch.setattr(client.app.state.scheduler, "submit", lambda _job_id: None)
+    started = client.post(
+        f"/v1/jobs/{job['job_id']}/start",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert started.status_code == 200
+    assert started.json()["status"] == "running"
+
+
+def test_bound_source_image_is_materialized_as_a_remotion_background(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job-source"
+    source = job_dir / "inputs" / "asset_logo" / "logo.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"png")
+    store = EngineStore(tmp_path / "runtime")
+    job = {
+        "job_id": "job-source",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "inputs": [
+            {
+                "asset_id": "asset_logo",
+                "storage_name": "inputs/asset_logo/logo.png",
+                "media_type": "image/png",
+            }
+        ],
+    }
+    payload = manifest()
+    payload["scenes"][0]["visual"]["asset_id"] = "asset_logo"
+    props = {"cuts": [{"id": "scene-01"}]}
+
+    approved = _apply_bound_source_inputs(payload, props, job_dir, store, job)
+
+    assert approved["asset_logo"]["path"] == source
+    assert props["cuts"][0]["backgroundImage"] == "inputs/asset_logo/logo.png"
+    assert props["cuts"][0]["backgroundOverlay"] == pytest.approx(0.28)
+
+
+def test_uploaded_music_is_bound_with_narration_ducking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.tool_registry import registry
+
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    job_dir = tmp_path / "job-music"
+    music = job_dir / "inputs" / "asset_music" / "theme.mp3"
+    music.parent.mkdir(parents=True)
+    music.write_bytes(b"ID3-approved-music")
+    store = EngineStore(tmp_path / "runtime")
+    job = {
+        "job_id": "job-music",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "inputs": [
+            {
+                "asset_id": "asset_music",
+                "storage_name": "inputs/asset_music/theme.mp3",
+                "media_type": "audio/mpeg",
+            }
+        ],
+    }
+    payload = manifest()
+    payload["audio"] = {
+        "voice": "none",
+        "music": "uploaded",
+        "music_asset_id": "asset_music",
+    }
+    payload["media_policy"] = {
+        "visual_source": "motion_graphics",
+        "voice_provider": "none",
+        "music_provider": "uploaded",
+        "fallback": "ask",
+    }
+    props = {"cuts": [{"id": "scene-01"}]}
+
+    media_assets = _materialize_media(payload, props, job_dir / "assets", store, job)
+
+    assert media_assets == []
+    assert props["audio"]["music"]["src"] == "inputs/asset_music/theme.mp3"
+    assert props["audio"]["music"]["duckingVolume"] < props["audio"]["music"]["volume"]
+
+
+def test_failed_job_retry_is_idempotent_and_reuses_the_same_workspace(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = request_body(execution_mode="platform_managed")
+    body["defer_start"] = True
+    created = client.post(
+        "/v1/jobs",
+        json=body,
+        headers=headers(key="retry-source"),
+    ).json()
+    stored = client.app.state.store.load_job(created["job_id"])
+    assert stored is not None
+    stored["status"] = "failed"
+    stored["stage"] = "quality"
+    stored["error"] = {"code": "QUALITY_GATE_FAILED", "message": "black frames", "retryable": True}
+    client.app.state.store.save_job(stored)
+    submitted: list[str] = []
+    monkeypatch.setattr(client.app.state.scheduler, "submit", submitted.append)
+
+    first = client.post(
+        f"/v1/jobs/{created['job_id']}/retry",
+        headers={"X-Tenant-ID": "tenant-a", "Idempotency-Key": "retry-1"},
+    )
+    replay = client.post(
+        f"/v1/jobs/{created['job_id']}/retry",
+        headers={"X-Tenant-ID": "tenant-a", "Idempotency-Key": "retry-1"},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["job_id"] == created["job_id"]
+    assert first.json()["retry_attempt"] == 1
+    assert first.json()["error"] is None
+    assert submitted == [created["job_id"]]
 
 
 def test_idempotency_replays_same_body_and_rejects_conflict(client: TestClient) -> None:
@@ -676,7 +944,7 @@ def test_approval_is_idempotent_and_render_registers_range_artifact(client: Test
             "-f",
             "lavfi",
             "-i",
-            "color=c=0x14232D:s=320x180:d=0.3",
+            "color=c=0x14232D:s=640x360:d=1",
             "-c:v",
             "libx264",
             "-pix_fmt",

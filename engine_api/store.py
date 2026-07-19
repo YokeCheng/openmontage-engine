@@ -156,6 +156,8 @@ class EngineStore:
                 "input": safe_body["input"],
                 "config_version": safe_body["config_version"],
                 "execution_mode": safe_body.get("execution_mode", "engine_managed"),
+                "defer_start": bool(safe_body.get("defer_start", False)),
+                "inputs": [],
                 "approval": None,
                 "actions": [],
                 "artifacts": [],

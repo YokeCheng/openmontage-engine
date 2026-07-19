@@ -7,9 +7,11 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 class MediaActionRequired(RuntimeError):
     """Rendering paused until CouncilForge resolves a provider fallback."""
+
+
+class QualityGateError(RuntimeError):
+    """The deterministic render completed but did not satisfy delivery gates."""
+
+    def __init__(self, report: dict[str, Any]) -> None:
+        self.report = report
+        failed = [item["name"] for item in report.get("checks", []) if item.get("status") == "failed"]
+        super().__init__("QUALITY_GATE_FAILED:" + ",".join(failed))
 
 
 def _first_output(result: Any) -> Path | None:
@@ -57,6 +68,65 @@ def _public_asset_src(path: Path, public_dir: Path) -> str:
         raise ValueError("MEDIA_OUTSIDE_JOB_WORKSPACE") from exc
 
 
+def _approved_job_inputs(job: dict[str, Any], public_dir: Path) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in job.get("inputs", []):
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("asset_id") or "")
+        storage_name = str(item.get("storage_name") or "")
+        if not asset_id or not storage_name:
+            continue
+        path = (public_dir / storage_name).resolve()
+        try:
+            path.relative_to(public_dir.resolve())
+        except ValueError as exc:
+            raise ValueError("SOURCE_INPUT_OUTSIDE_JOB_WORKSPACE") from exc
+        if not path.is_file():
+            raise FileNotFoundError(f"SOURCE_INPUT_MISSING:{asset_id}")
+        result[asset_id] = {**item, "path": path}
+    return result
+
+
+def _apply_bound_source_inputs(
+    manifest: dict[str, Any],
+    props: dict[str, Any],
+    public_dir: Path,
+    store: EngineStore,
+    job: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    approved_inputs = _approved_job_inputs(job, public_dir)
+    cuts = props.get("cuts") if isinstance(props.get("cuts"), list) else []
+    scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
+    for index, (scene, cut) in enumerate(zip(scenes, cuts)):
+        visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+        asset_id = str(visual.get("asset_id") or visual.get("source_asset_id") or "")
+        if not asset_id:
+            continue
+        source_input = approved_inputs.get(asset_id)
+        if source_input is None:
+            raise ValueError(f"SOURCE_INPUT_NOT_UPLOADED:{asset_id}")
+        media_type = str(source_input.get("media_type") or "application/octet-stream")
+        if media_type.startswith("image/"):
+            cut["backgroundImage"] = _public_asset_src(source_input["path"], public_dir)
+        elif media_type.startswith("video/"):
+            cut["backgroundVideo"] = _public_asset_src(source_input["path"], public_dir)
+            cut["backgroundVideoStart"] = float(visual.get("start_seconds") or 0)
+        else:
+            raise ValueError(f"SOURCE_INPUT_VISUAL_TYPE_UNSUPPORTED:{asset_id}")
+        cut["backgroundOverlay"] = float(visual.get("overlay") or 0.28)
+        store.append_event(
+            job,
+            "media.source_input_bound",
+            {
+                "scene_id": str(scene.get("scene_id") or f"scene-{index + 1:02d}"),
+                "asset_id": asset_id,
+                "media_type": media_type,
+            },
+        )
+    return approved_inputs
+
+
 def _materialize_media(
     manifest: dict[str, Any],
     props: dict[str, Any],
@@ -70,22 +140,24 @@ def _materialize_media(
     source_mode = str(policy.get("visual_source") or "motion_graphics")
     voice_provider = str(policy.get("voice_provider") or "none")
     music_provider = str(policy.get("music_provider") or "none")
-    if source_mode == "motion_graphics" and voice_provider == "none" and music_provider == "none":
-        return []
-
-    from tools.tool_registry import registry
-
-    registry.ensure_discovered()
     asset_dir.mkdir(parents=True, exist_ok=True)
     media_assets: list[dict[str, Any]] = []
     public_dir = asset_dir.parent
     cuts = props.get("cuts") if isinstance(props.get("cuts"), list) else []
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     aspect_ratio = str((manifest.get("render") or {}).get("aspect_ratio") or "16:9")
+    approved_inputs = _apply_bound_source_inputs(manifest, props, public_dir, store, job)
+    if source_mode == "motion_graphics" and voice_provider == "none" and music_provider == "none":
+        return []
+
+    from tools.tool_registry import registry
+
+    registry.ensure_discovered()
 
     def fallback(scene_id: str, capability: str) -> None:
         if str(policy.get("fallback") or "ask") == "ask":
             action_id = new_id("action")
+            recommended_resolution = "retry" if capability == "tts" else "use_motion_graphics"
             action = {
                 "action_id": action_id,
                 "job_id": job["job_id"],
@@ -93,7 +165,7 @@ def _materialize_media(
                 "status": "pending",
                 "title": "Media provider unavailable",
                 "summary": f"The approved {capability} path is unavailable for {scene_id}.",
-                "recommended_resolution": "use_motion_graphics",
+                "recommended_resolution": recommended_resolution,
                 "options": [
                     {
                         "value": "use_motion_graphics",
@@ -240,6 +312,50 @@ def _materialize_media(
         if selector is None or selector.get_status().value != "available":
             fallback("narration", "tts")
         else:
+            # Each scene has an independent approved narration request and a
+            # distinct output path. Execute the network-bound provider calls in
+            # a small bounded pool, then preserve timeline order while fitting
+            # and registering the returned audio. This reduces production time
+            # without adding Agent/model calls or changing scene decisions.
+            tts_results: dict[int, Any | None] = {}
+            pending_tts: dict[int, Any] = {}
+            tts_inputs: list[tuple[int, str, Path]] = []
+            for index, scene in enumerate(scenes):
+                narration = str(scene.get("narration") or "").strip()
+                narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
+                if narration and not (narration_path.is_file() and narration_path.stat().st_size > 0):
+                    tts_inputs.append((index, narration, narration_path))
+            def execute_tts(inputs: dict[str, Any]) -> Any:
+                result: Any = None
+                for attempt in range(1, 4):
+                    result = selector.execute(inputs)
+                    if result.success or not bool(getattr(result, "retryable", False)):
+                        return result
+                    time.sleep(0.25 * (2 ** (attempt - 1)))
+                return result
+
+            if tts_inputs:
+                # Three concurrent calls remain below the common provider burst
+                # limit while still collapsing six serial network round trips
+                # into two waves. Retry only the failed request in-place.
+                with ThreadPoolExecutor(max_workers=min(3, len(tts_inputs)), thread_name_prefix="tts") as pool:
+                    for index, narration, narration_path in tts_inputs:
+                        pending_tts[index] = pool.submit(
+                            execute_tts,
+                            {
+                                "text": narration,
+                                "preferred_provider": voice_provider,
+                                "speed": float((manifest.get("audio") or {}).get("voice_speed") or 1),
+                                "output_path": str(narration_path),
+                            },
+                        )
+                    for index, future in pending_tts.items():
+                        try:
+                            tts_results[index] = future.result()
+                        except Exception:
+                            logger.exception("Parallel TTS request failed for scene %s", index + 1)
+                            tts_results[index] = None
+
             narration_segments: list[dict[str, Any]] = []
             cursor_seconds = 0.0
             for index, scene in enumerate(scenes):
@@ -256,29 +372,46 @@ def _materialize_media(
                 # Scene segments preserve the approved storyboard timing and
                 # make burned-in captions line up with the spoken content.
                 narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
-                if narration_path.is_file() and narration_path.stat().st_size > 0:
+                narration_receipt = asset_dir / f"narration-{index + 1:02d}.receipt.json"
+                if index not in tts_results and narration_path.is_file() and narration_path.stat().st_size > 0:
+                    receipt: dict[str, Any] = {}
+                    if narration_receipt.is_file():
+                        try:
+                            loaded_receipt = json.loads(narration_receipt.read_text(encoding="utf-8"))
+                            receipt = loaded_receipt if isinstance(loaded_receipt, dict) else {}
+                        except (OSError, ValueError):
+                            receipt = {}
                     narration_asset: dict[str, Any] | None = {
                         "path": narration_path.resolve(),
                         "kind": "audio",
-                        "tool": "cached",
-                        "provider": voice_provider,
-                        "cost_usd": 0.0,
+                        "tool": str(receipt.get("tool") or "cached"),
+                        "provider": str(receipt.get("provider") or voice_provider),
+                        # The receipt records the original provider charge. It
+                        # is registered once when the final artifact set is
+                        # committed, even if a retry reused this file.
+                        "cost_usd": float(receipt.get("cost_usd") or 0),
                     }
                 else:
-                    result = selector.execute(
-                        {
-                            "text": narration,
-                            "preferred_provider": voice_provider,
-                            "speed": float((manifest.get("audio") or {}).get("voice_speed") or 1),
-                            "output_path": str(narration_path),
-                        }
-                    )
-                    path = _first_output(result) if result.success else None
+                    result = tts_results.get(index)
+                    path = _first_output(result) if result is not None and result.success else None
                     narration_asset = (
                         _media_asset(path, kind="audio", result=result, tool_name="tts_selector")
                         if path
                         else None
                     )
+                    if narration_asset is not None:
+                        narration_receipt.write_text(
+                            json.dumps(
+                                {
+                                    "schema_version": "1.0",
+                                    "tool": narration_asset["tool"],
+                                    "provider": narration_asset["provider"],
+                                    "cost_usd": narration_asset["cost_usd"],
+                                },
+                                ensure_ascii=False,
+                            ),
+                            encoding="utf-8",
+                        )
                 if narration_asset is None:
                     fallback(scene_id, "tts")
                     cursor_seconds += scene_duration
@@ -326,11 +459,28 @@ def _materialize_media(
                 }
 
     if music_provider != "none":
+        music_asset_id = str((manifest.get("audio") or {}).get("music_asset_id") or "")
+        approved_music = approved_inputs.get(music_asset_id) if music_asset_id else None
+        if approved_music is not None:
+            media_type = str(approved_music.get("media_type") or "")
+            if not media_type.startswith("audio/"):
+                raise ValueError(f"SOURCE_INPUT_MUSIC_TYPE_UNSUPPORTED:{music_asset_id}")
+            props.setdefault("audio", {})["music"] = {
+                "src": _public_asset_src(approved_music["path"], public_dir),
+                "volume": 0.12,
+                "duckingVolume": 0.045,
+                "fadeInSeconds": 1.5,
+                "fadeOutSeconds": 2.5,
+                "loop": True,
+            }
+            store.append_event(job, "media.music_input_bound", {"asset_id": music_asset_id})
+            return media_assets
         music_path = asset_dir / "music.mp3"
         if music_path.is_file() and music_path.stat().st_size > 0:
             props.setdefault("audio", {})["music"] = {
-                "src": str(music_path.resolve()),
+                "src": _public_asset_src(music_path, public_dir),
                 "volume": 0.12,
+                "duckingVolume": 0.045,
                 "fadeInSeconds": 1.5,
                 "fadeOutSeconds": 2.5,
                 "loop": True,
@@ -364,8 +514,9 @@ def _materialize_media(
             path = _first_output(result) if result.success else None
             if path:
                 props.setdefault("audio", {})["music"] = {
-                    "src": str(path),
+                    "src": _public_asset_src(path, public_dir),
                     "volume": 0.12,
+                    "duckingVolume": 0.045,
                     "fadeInSeconds": 1.5,
                     "fadeOutSeconds": 2.5,
                     "loop": True,
@@ -499,6 +650,183 @@ def _media_artifact_metadata(media_path: Path, media_asset: dict[str, Any]) -> d
     return metadata
 
 
+def _quality_report(
+    output_path: Path,
+    manifest: dict[str, Any],
+    props: dict[str, Any],
+) -> dict[str, Any]:
+    """Run deterministic, vendor-independent checks on a rendered delivery."""
+
+    metadata = _ffprobe(output_path)
+    render = manifest.get("render") if isinstance(manifest.get("render"), dict) else {}
+    audio = manifest.get("audio") if isinstance(manifest.get("audio"), dict) else {}
+    expected_duration = float(render.get("duration_seconds") or 0)
+    checks: list[dict[str, Any]] = []
+
+    def check(name: str, passed: bool, *, actual: Any, expected: Any, detail: str) -> None:
+        checks.append(
+            {
+                "name": name,
+                "status": "passed" if passed else "failed",
+                "actual": actual,
+                "expected": expected,
+                "detail": detail,
+            }
+        )
+
+    duration = float(metadata.get("duration_seconds") or 0)
+    duration_tolerance = max(0.35, expected_duration * 0.02)
+    check(
+        "duration",
+        expected_duration > 0 and abs(duration - expected_duration) <= duration_tolerance,
+        actual=duration,
+        expected={"seconds": expected_duration, "tolerance": duration_tolerance},
+        detail="Final duration must match the approved timeline.",
+    )
+    expected_size = [int(render.get("width") or 0), int(render.get("height") or 0)]
+    actual_size = [int(metadata.get("width") or 0), int(metadata.get("height") or 0)]
+    check(
+        "resolution",
+        expected_size == actual_size and all(actual_size),
+        actual=actual_size,
+        expected=expected_size,
+        detail="Final dimensions must match the approved render contract.",
+    )
+    check(
+        "encoding",
+        metadata.get("video_codec") == "h264",
+        actual={"video": metadata.get("video_codec"), "audio": metadata.get("audio_codec")},
+        expected={"video": "h264"},
+        detail="The delivery video must use H.264 for broad playback support.",
+    )
+    narration_required = str(audio.get("voice") or "none") != "none"
+    has_audio = bool(metadata.get("audio_codec"))
+    check(
+        "audio_stream",
+        has_audio or not narration_required,
+        actual=metadata.get("audio_codec"),
+        expected="audio stream" if narration_required else "optional",
+        detail="Approved narration requires a playable audio stream.",
+    )
+
+    black_seconds = 0.0
+    black_process = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(output_path),
+            "-vf",
+            "blackdetect=d=0.4:pix_th=0.04",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for value in re.findall(r"black_duration:([0-9.]+)", black_process.stderr):
+        black_seconds += float(value)
+    black_ratio = round(black_seconds / duration, 4) if duration else 1.0
+    check(
+        "black_frames",
+        black_ratio < 0.9,
+        actual={"seconds": round(black_seconds, 3), "ratio": black_ratio},
+        expected={"maximum_ratio": 0.9},
+        detail="A delivery cannot be predominantly black frames.",
+    )
+
+    silence_seconds = 0.0
+    if has_audio:
+        silence_process = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(output_path),
+                "-af",
+                "silencedetect=noise=-48dB:d=0.5",
+                "-vn",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        silence_durations = re.findall(r"silence_duration: ([0-9.]+)", silence_process.stderr)
+        for value in silence_durations:
+            silence_seconds += float(value)
+        if not silence_durations:
+            starts = re.findall(r"silence_start: ([0-9.]+)", silence_process.stderr)
+            if starts:
+                silence_seconds = max(0.0, duration - float(starts[0]))
+    silence_ratio = round(silence_seconds / duration, 4) if duration and has_audio else 0.0
+    check(
+        "silence",
+        not narration_required or (has_audio and silence_ratio < 0.9),
+        actual={"seconds": round(silence_seconds, 3), "ratio": silence_ratio},
+        expected={"maximum_ratio": 0.9 if narration_required else 1.0},
+        detail="A narrated delivery cannot be predominantly silent.",
+    )
+
+    caption_style = props.get("captionStyle") if isinstance(props.get("captionStyle"), dict) else {}
+    caption_safe = (
+        1 <= int(caption_style.get("wordsPerPage") or 1) <= 2
+        and 24 <= int(caption_style.get("fontSize") or 42) <= 72
+        and 40 <= int(caption_style.get("maxWidthPercent") or 72) <= 85
+        and 4 <= int(caption_style.get("bottomMarginPercent") or 6) <= 20
+    )
+    check(
+        "caption_safe_area",
+        caption_safe,
+        actual=caption_style or "default-safe-style",
+        expected={"maxWidthPercent": "40-85", "bottomMarginPercent": "4-20"},
+        detail="Caption layout must remain inside the approved safe area.",
+    )
+    check(
+        "artifact_integrity",
+        output_path.is_file() and output_path.stat().st_size > 0,
+        actual=output_path.stat().st_size if output_path.exists() else 0,
+        expected="> 0 bytes",
+        detail="The final MP4 must exist and contain bytes.",
+    )
+    failed = [item["name"] for item in checks if item["status"] == "failed"]
+    return {
+        "schema_version": "1.0",
+        "status": "failed" if failed else "passed",
+        "checks": checks,
+        "failed_checks": failed,
+        "media": metadata,
+        "created_at": utc_now(),
+    }
+
+
+def _render_failure_detail(exc: Exception) -> tuple[str, str]:
+    raw = str(exc)
+    known = {
+        "NARRATION_EXCEEDS_SAFE_TIMELINE_REPAIR": "A narration segment is too long for its approved scene. Shorten the narration or increase the scene duration.",
+        "NARRATION_TIMELINE_REPAIR_FAILED": "Narration could not be fitted safely to the approved timeline.",
+        "MEDIA_OUTSIDE_JOB_WORKSPACE": "A media file was outside the isolated job workspace.",
+    }
+    for code, detail in known.items():
+        if code in raw:
+            return code, detail
+    if raw.startswith("SOURCE_INPUT_"):
+        code = raw.split(":", 1)[0]
+        return code, "An approved source asset is missing or has an unsupported media type. Re-upload or rebind the material."
+    if isinstance(exc, subprocess.CalledProcessError):
+        return "COMPOSITOR_PROCESS_FAILED", "Remotion or FFmpeg could not complete the approved composition."
+    if isinstance(exc, FileNotFoundError):
+        return "RENDER_DEPENDENCY_MISSING", "A required approved media file or render dependency is missing."
+    return "RENDER_FAILED", "The video renderer failed while composing the approved production order."
+
+
 def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
     job = store.load_job(job_id)
     if not job or job["status"] in {"cancelled", "succeeded"}:
@@ -604,7 +932,13 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             segments = []
             for scene in manifest["scenes"]:
                 end = cursor + float(scene["duration_seconds"])
-                segments.append({"text": scene.get("narration", ""), "start": cursor, "end": end})
+                segments.append(
+                    {
+                        "text": scene.get("subtitle") or scene.get("narration", ""),
+                        "start": cursor,
+                        "end": end,
+                    }
+                )
                 cursor = end
             subtitle_result = SubtitleGen().execute(
                 {
@@ -639,7 +973,40 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                         },
                     }
                 )
+        current["stage"] = "quality"
+        current["progress"] = {"percent": 94, "message": "Running automatic quality checks", "updated_at": utc_now()}
+        store.save_job(current)
+        quality = _quality_report(output_path, manifest, props)
+        report_path = (artifact_dir / "quality-report.json").resolve()
+        report_path.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_id = new_id("artifact")
+        artifacts.append(
+            {
+                "artifact_id": report_id,
+                "job_id": job_id,
+                "kind": "report",
+                "role": "final",
+                "media_type": "application/json; charset=utf-8",
+                "uri": f"engine://jobs/{job_id}/artifacts/{report_id}",
+                "storage_name": "artifacts/quality-report.json",
+                "version": 1,
+                "size_bytes": report_path.stat().st_size,
+                "checksum": {
+                    "algorithm": "sha256",
+                    "value": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                },
+                "created_at": utc_now(),
+                "metadata": {
+                    "quality_status": quality["status"],
+                    "failed_checks": quality["failed_checks"],
+                },
+            }
+        )
         current["artifacts"] = artifacts
+        current["quality_report"] = quality
+        store.save_job(current)
+        if quality["status"] != "passed":
+            raise QualityGateError(quality)
         current["status"] = "succeeded"
         current["stage"] = "delivery"
         current["progress"] = {"percent": 100, "message": "Video ready", "updated_at": utc_now()}
@@ -653,18 +1020,37 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         store.append_event(current, "job.succeeded", {"artifact_id": artifact_id})
     except MediaActionRequired:
         return
+    except QualityGateError as exc:
+        current = store.load_job(job_id)
+        if not current or current["status"] == "cancelled":
+            return
+        failed = ", ".join(exc.report.get("failed_checks") or [])
+        current["status"] = "failed"
+        current["stage"] = "quality"
+        current["error"] = {
+            "code": "QUALITY_GATE_FAILED",
+            "message": f"Automatic quality checks failed: {failed}.",
+            "retryable": True,
+            "failed_checks": exc.report.get("failed_checks") or [],
+        }
+        current["progress"] = {"percent": 94, "message": "Quality checks failed", "updated_at": utc_now()}
+        store.save_job(current)
+        store.append_event(current, "job.failed", {"code": "QUALITY_GATE_FAILED", "failed_checks": exc.report.get("failed_checks") or []})
     except Exception as exc:
         logger.exception("Video render failed for job %s", job_id)
         current = store.load_job(job_id)
         if not current or current["status"] == "cancelled":
             return
+        code, detail = _render_failure_detail(exc)
+        failed_stage = str(current.get("stage") or "rendering")
         current["status"] = "failed"
-        current["stage"] = "rendering"
+        current["stage"] = failed_stage
         current["error"] = {
-            "code": "RENDER_FAILED",
-            "message": "The video renderer could not complete this job.",
+            "code": code,
+            "stage": failed_stage,
+            "message": detail,
             "retryable": True,
         }
         current["progress"] = {"percent": max(72, current["progress"]["percent"]), "message": "Render failed", "updated_at": utc_now()}
         store.save_job(current)
-        store.append_event(current, "job.failed", {"code": "RENDER_FAILED", "diagnostic": type(exc).__name__})
+        store.append_event(current, "job.failed", {"code": code, "stage": failed_stage, "diagnostic": type(exc).__name__})

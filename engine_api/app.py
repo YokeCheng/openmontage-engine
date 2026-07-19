@@ -45,6 +45,18 @@ _ALLOWED_RUNTIME_FIELDS: set[str] | None = None
 _SECRET_FIELD_PATTERN = re.compile(
     r"\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|KEY|TOKEN|SECRET|CREDENTIALS|URL)|VIDEO_GEN_LOCAL_ENABLED|MUSIC_LIBRARY_DIR)\b"
 )
+_SOURCE_ASSET_ID_PATTERN = re.compile(r"^asset_[a-f0-9]{32}$")
+_SOURCE_INPUT_MAX_BYTES = 500 * 1024 * 1024
+
+
+def _safe_source_input_name(value: str) -> str:
+    normalized = value.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not normalized or normalized in {".", ".."} or any(ord(character) < 32 for character in normalized):
+        raise ValueError("INVALID_SOURCE_INPUT_FILENAME")
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip(" .-")
+    if not cleaned:
+        raise ValueError("INVALID_SOURCE_INPUT_FILENAME")
+    return cleaned[:240]
 
 
 def _pipeline_platform_contract(data: dict[str, Any]) -> dict[str, Any]:
@@ -281,6 +293,8 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     result.pop("correlation_id", None)
     for artifact in result.get("artifacts", []):
         artifact.pop("storage_name", None)
+    for source_input in result.get("inputs", []):
+        source_input.pop("storage_name", None)
     return result
 
 
@@ -677,12 +691,19 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 # CouncilForge owns the human approval, budget policy and
                 # business lifecycle. The engine receives an immutable,
                 # already-approved manifest and starts deterministic work.
-                job["status"] = "running"
-                job["stage"] = "production"
-                job["progress"] = {"percent": 40, "message": "Preparing deterministic render", "updated_at": utc_now()}
-                store.save_job(job)
-                store.append_event(job, "job.status_changed", {"status": "running", "approved_by": "platform"})
-                scheduler.submit(job["job_id"])
+                if body.defer_start:
+                    job["status"] = "created"
+                    job["stage"] = "inputs"
+                    job["progress"] = {"percent": 34, "message": "Waiting for approved source assets", "updated_at": utc_now()}
+                    store.save_job(job)
+                    store.append_event(job, "job.inputs_required", {"status": "created"})
+                else:
+                    job["status"] = "running"
+                    job["stage"] = "production"
+                    job["progress"] = {"percent": 40, "message": "Preparing deterministic render", "updated_at": utc_now()}
+                    store.save_job(job)
+                    store.append_event(job, "job.status_changed", {"status": "running", "approved_by": "platform"})
+                    scheduler.submit(job["job_id"])
             else:
                 approval_id = new_id("approval")
                 job["status"] = "waiting_approval"
@@ -705,6 +726,141 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
     @app.get("/v1/jobs/{job_id}")
     async def get_job(job_id: str, tenant_id: str = Depends(authorize)) -> dict[str, Any]:
         return _public_job(owned(job_id, tenant_id))
+
+    @app.put("/v1/jobs/{job_id}/inputs/{asset_id}")
+    async def upload_job_input(
+        job_id: str,
+        asset_id: str,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+        x_file_name: str | None = Header(default=None),
+        x_content_sha256: str | None = Header(default=None),
+    ) -> JSONResponse:
+        job = owned(job_id, tenant_id)
+        if job.get("execution_mode") != "platform_managed" or not job.get("defer_start"):
+            return problem(409, "Input upload unavailable", "This job does not accept deferred source inputs.", "JOB_INPUTS_NOT_DEFERRED", request)
+        if job.get("status") != "created" or job.get("stage") != "inputs":
+            return problem(409, "Invalid job state", "Source inputs can only be uploaded before the job starts.", "JOB_INVALID_TRANSITION", request)
+        if not _SOURCE_ASSET_ID_PATTERN.fullmatch(asset_id):
+            return problem(404, "Source input not found", "The requested source input is not declared by this job.", "SOURCE_INPUT_NOT_FOUND", request)
+        declarations = [
+            item
+            for item in (job.get("input", {}).get("source_materials") or [])
+            if isinstance(item, dict) and str(item.get("platform_asset_id") or "") == asset_id
+        ]
+        if not declarations:
+            return problem(404, "Source input not found", "The requested source input is not declared by this job.", "SOURCE_INPUT_NOT_FOUND", request)
+        expected_checksum = str(x_content_sha256 or declarations[0].get("checksum_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_checksum):
+            return problem(422, "Missing source checksum", "X-Content-SHA256 must contain the approved SHA-256.", "SOURCE_INPUT_CHECKSUM_REQUIRED", request)
+        try:
+            file_name = _safe_source_input_name(x_file_name or str(declarations[0].get("filename") or asset_id))
+        except ValueError:
+            return problem(422, "Invalid source filename", "The source input filename is not safe.", "SOURCE_INPUT_FILENAME_INVALID", request)
+        existing = next((item for item in job.get("inputs", []) if item.get("asset_id") == asset_id), None)
+        if existing:
+            if existing.get("checksum_sha256") == expected_checksum:
+                return JSONResponse(content={key: value for key, value in existing.items() if key != "storage_name"})
+            return problem(409, "Source input conflict", "This input already exists with a different checksum.", "SOURCE_INPUT_CONFLICT", request)
+
+        relative_name = f"inputs/{asset_id}/{file_name}"
+        destination = (store.jobs_dir / job_id / relative_name).resolve()
+        job_root = (store.jobs_dir / job_id).resolve()
+        if job_root not in destination.parents:
+            return problem(422, "Invalid source path", "The source input path escaped the job workspace.", "SOURCE_INPUT_PATH_INVALID", request)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with temporary.open("wb") as handle:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > _SOURCE_INPUT_MAX_BYTES:
+                        return problem(413, "Source input too large", "A source input cannot exceed 500 MiB.", "SOURCE_INPUT_TOO_LARGE", request)
+                    digest.update(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if digest.hexdigest() != expected_checksum:
+                return problem(422, "Source checksum mismatch", "Uploaded bytes do not match the approved source asset.", "SOURCE_INPUT_CHECKSUM_MISMATCH", request)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        source_input = {
+            "asset_id": asset_id,
+            "file_name": file_name,
+            "media_type": str(request.headers.get("content-type") or declarations[0].get("media_type") or "application/octet-stream"),
+            "size_bytes": size,
+            "checksum_sha256": expected_checksum,
+            "storage_name": relative_name,
+            "created_at": utc_now(),
+        }
+        job.setdefault("inputs", []).append(source_input)
+        store.save_job(job)
+        store.append_event(job, "job.input_uploaded", {"asset_id": asset_id, "size_bytes": size})
+        return JSONResponse(status_code=201, content={key: value for key, value in source_input.items() if key != "storage_name"})
+
+    @app.post("/v1/jobs/{job_id}/start")
+    async def start_deferred_job(
+        job_id: str,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+    ) -> JSONResponse:
+        job = owned(job_id, tenant_id)
+        if job.get("status") in {"running", "rendering", "succeeded"}:
+            return JSONResponse(content=_public_job(job))
+        if job.get("execution_mode") != "platform_managed" or not job.get("defer_start"):
+            return problem(409, "Deferred start unavailable", "This job is not waiting for source inputs.", "JOB_START_NOT_DEFERRED", request)
+        if job.get("status") != "created" or job.get("stage") != "inputs":
+            return problem(409, "Invalid job state", "Only a created input-stage job can start.", "JOB_INVALID_TRANSITION", request)
+        required = {
+            str(item.get("platform_asset_id"))
+            for item in (job.get("input", {}).get("source_materials") or [])
+            if isinstance(item, dict) and str(item.get("platform_asset_id") or "").strip()
+        }
+        uploaded = {str(item.get("asset_id")) for item in job.get("inputs", [])}
+        missing = sorted(required - uploaded)
+        if missing:
+            return problem(409, "Source inputs missing", f"Upload the approved source inputs before starting: {', '.join(missing)}", "SOURCE_INPUTS_MISSING", request)
+        job["status"] = "running"
+        job["stage"] = "production"
+        job["progress"] = {"percent": 40, "message": "Preparing deterministic render", "updated_at": utc_now()}
+        store.save_job(job)
+        store.append_event(job, "job.status_changed", {"status": "running", "approved_by": "platform"})
+        scheduler.submit(job_id)
+        return JSONResponse(content=_public_job(job))
+
+    @app.post("/v1/jobs/{job_id}/retry")
+    async def retry_failed_job(
+        job_id: str,
+        request: Request,
+        tenant_id: str = Depends(authorize),
+        idempotency_key: str | None = Header(default=None),
+    ) -> JSONResponse:
+        if not idempotency_key:
+            return problem(400, "Missing idempotency key", "Idempotency-Key is required.", "IDEMPOTENCY_KEY_REQUIRED", request)
+        job = owned(job_id, tenant_id)
+        retry_keys = job.setdefault("retry_keys", [])
+        if idempotency_key in retry_keys or job.get("status") in {"running", "rendering", "succeeded"}:
+            return JSONResponse(content=_public_job(job))
+        if job.get("status") != "failed":
+            return problem(409, "Invalid job state", "Only a failed job can resume from its cached workspace.", "JOB_RETRY_NOT_AVAILABLE", request)
+        retry_keys.append(idempotency_key)
+        job["retry_attempt"] = int(job.get("retry_attempt") or 0) + 1
+        job["status"] = "running"
+        job["stage"] = "production"
+        job["error"] = None
+        # The artifact index is rebuilt. Provider files in assets/ and approved
+        # source inputs stay in place so retry does not repeat paid generation.
+        job["artifacts"] = []
+        job["progress"] = {"percent": 52, "message": "Resuming from cached production assets", "updated_at": utc_now()}
+        store.save_job(job)
+        store.append_event(job, "job.retry_started", {"attempt": job["retry_attempt"], "cache_reuse": True})
+        scheduler.submit(job_id)
+        return JSONResponse(content=_public_job(job))
 
     @app.post("/v1/jobs/{job_id}/approve")
     async def approve(job_id: str, body: ApproveRequest, request: Request, tenant_id: str = Depends(authorize)) -> JSONResponse:

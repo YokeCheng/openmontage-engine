@@ -68,6 +68,7 @@ class CreateJobRequest(BaseModel):
     input: VideoExecutionManifest
     config_version: str = Field(min_length=1, max_length=240)
     execution_mode: Literal["engine_managed", "platform_managed"] = "engine_managed"
+    defer_start: bool = False
     credential_grants: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
