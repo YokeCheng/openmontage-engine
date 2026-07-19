@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,70 @@ class QualityGateError(RuntimeError):
         self.report = report
         failed = [item["name"] for item in report.get("checks", []) if item.get("status") == "failed"]
         super().__init__("QUALITY_GATE_FAILED:" + ",".join(failed))
+
+
+def _remotion_command(
+    repo_root: Path,
+    *,
+    composition_id: str,
+    output_path: Path,
+    props_path: Path,
+    public_dir: Path,
+) -> list[str]:
+    """Build a non-interactive command from the reviewed local installation.
+
+    ``npx`` is intentionally not used here. A long-running API process may
+    inherit a terminal as stdin, in which case npm can wait forever for an
+    install/confirmation prompt even though the repository already contains a
+    reviewed Remotion installation. The engine must execute that pinned local
+    CLI directly so rendering is deterministic and cannot become interactive.
+    """
+
+    cli = (repo_root / "remotion-composer" / "node_modules" / ".bin" / "remotion").resolve()
+    if not cli.is_file():
+        raise FileNotFoundError("REMOTION_CLI_MISSING")
+    concurrency = max(
+        1,
+        int(os.getenv("OPENMONTAGE_REMOTION_CONCURRENCY", str(min(8, os.cpu_count() or 1)))),
+    )
+    return [
+        str(cli),
+        "render",
+        "src/index.tsx",
+        composition_id,
+        str(output_path),
+        f"--props={props_path}",
+        f"--public-dir={public_dir}",
+        "--codec=h264",
+        f"--concurrency={concurrency}",
+        f"--gl={os.getenv('OPENMONTAGE_REMOTION_GL', 'angle')}",
+        f"--x264-preset={os.getenv('OPENMONTAGE_REMOTION_X264_PRESET', 'veryfast')}",
+    ]
+
+
+def _terminate_process_group(process: subprocess.Popen[Any], *, grace_seconds: float = 5) -> None:
+    """Stop Remotion and every browser/FFmpeg child started for the render."""
+
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.kill()
+    process.wait(timeout=grace_seconds)
 
 
 def _first_output(result: Any) -> Path | None:
@@ -578,6 +643,64 @@ def _ffprobe(path: Path) -> dict[str, Any]:
     }
 
 
+def _create_cover_artifact(
+    output_path: Path,
+    *,
+    artifact_dir: Path,
+    job_id: str,
+    video_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Extract a deterministic platform cover from the approved final video."""
+
+    duration = max(0.1, float(video_metadata.get("duration_seconds") or 0.1))
+    seek_seconds = min(max(0.1, duration * 0.12), max(0.1, duration - 0.1))
+    cover_path = (artifact_dir / "cover.jpg").resolve()
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{seek_seconds:.3f}",
+            "-i",
+            str(output_path),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(cover_path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    artifact_id = new_id("artifact")
+    return {
+        "artifact_id": artifact_id,
+        "job_id": job_id,
+        "kind": "image",
+        "role": "final",
+        "media_type": "image/jpeg",
+        "uri": f"engine://jobs/{job_id}/artifacts/{artifact_id}",
+        "storage_name": "artifacts/cover.jpg",
+        "version": 1,
+        "size_bytes": cover_path.stat().st_size,
+        "checksum": {
+            "algorithm": "sha256",
+            "value": hashlib.sha256(cover_path.read_bytes()).hexdigest(),
+        },
+        "created_at": utc_now(),
+        "metadata": {
+            "width": video_metadata.get("width"),
+            "height": video_metadata.get("height"),
+            "image_format": "JPEG",
+            "source": "final_video",
+            "time_seconds": round(seek_seconds, 3),
+        },
+    }
+
+
 def _fit_audio_to_timeline(
     source_path: Path,
     *,
@@ -813,6 +936,8 @@ def _render_failure_detail(exc: Exception) -> tuple[str, str]:
         "NARRATION_EXCEEDS_SAFE_TIMELINE_REPAIR": "A narration segment is too long for its approved scene. Shorten the narration or increase the scene duration.",
         "NARRATION_TIMELINE_REPAIR_FAILED": "Narration could not be fitted safely to the approved timeline.",
         "MEDIA_OUTSIDE_JOB_WORKSPACE": "A media file was outside the isolated job workspace.",
+        "REMOTION_CLI_MISSING": "The reviewed local Remotion installation is missing. Install the repository dependencies before retrying.",
+        "REMOTION_RENDER_TIMEOUT": "Remotion exceeded the configured render deadline and was stopped safely.",
     }
     for code, detail in known.items():
         if code in raw:
@@ -835,7 +960,10 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         job["status"] = "rendering"
         job["stage"] = "rendering"
         job["progress"] = {"percent": 72, "message": "Rendering MP4", "updated_at": utc_now()}
-        store.save_job(job)
+        saved, active = store.save_job_if_active(job)
+        if not active or saved is None:
+            return
+        job = saved
         store.append_event(job, "job.status_changed", {"status": "rendering"})
 
         job_dir = store.jobs_dir / job_id
@@ -850,28 +978,50 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         media_assets: list[dict[str, Any]] = []
         if mode != "fixture-copy" and composition_id == "Explainer":
             job["progress"] = {"percent": 52, "message": "Preparing approved media", "updated_at": utc_now()}
-            store.save_job(job)
+            saved, active = store.save_job_if_active(job)
+            if not active or saved is None:
+                return
+            job = saved
             media_assets = _materialize_media(manifest, props, job_dir / "assets", store, job)
         props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
         if mode == "fixture-copy":
             fixture = Path(os.environ["OPENMONTAGE_ENGINE_FIXTURE_VIDEO"])
             shutil.copyfile(fixture, output_path)
         else:
-            composer = repo_root / "remotion-composer"
-            command = [
-                "npx", "remotion", "render", "src/index.tsx", composition_id,
-                str(output_path), f"--props={props_path}", f"--public-dir={job_dir}", "--codec=h264",
-            ]
-            process = subprocess.Popen(command, cwd=composer)
+            command = _remotion_command(
+                repo_root,
+                composition_id=composition_id,
+                output_path=output_path,
+                props_path=props_path,
+                public_dir=job_dir,
+            )
+            job["progress"] = {"percent": 72, "message": "Rendering MP4", "updated_at": utc_now()}
+            saved, active = store.save_job_if_active(job)
+            if not active or saved is None:
+                return
+            job = saved
+            store.append_event(job, "render.started", {"runtime": "remotion"})
+            render_timeout_seconds = max(
+                30,
+                int(os.getenv("OPENMONTAGE_ENGINE_RENDER_TIMEOUT_SECONDS", "300")),
+            )
+            deadline = time.monotonic() + render_timeout_seconds
+            logger.info("Starting local Remotion render for job %s", job_id)
+            process = subprocess.Popen(
+                command,
+                cwd=repo_root / "remotion-composer",
+                stdin=subprocess.DEVNULL,
+                env={**os.environ, "CI": "1", "NO_COLOR": "1", "npm_config_yes": "true"},
+                start_new_session=True,
+            )
             while process.poll() is None:
                 latest = store.load_job(job_id)
                 if not latest or latest.get("status") == "cancelled":
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    _terminate_process_group(process)
                     return
+                if time.monotonic() >= deadline:
+                    _terminate_process_group(process)
+                    raise TimeoutError("REMOTION_RENDER_TIMEOUT")
                 time.sleep(0.25)
             if process.returncode != 0:
                 raise subprocess.CalledProcessError(process.returncode, command)
@@ -896,6 +1046,12 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             "created_at": utc_now(),
             "metadata": metadata,
         }
+        cover_artifact = _create_cover_artifact(
+            output_path,
+            artifact_dir=artifact_dir,
+            job_id=job_id,
+            video_metadata=metadata,
+        )
         artifacts: list[dict[str, Any]] = []
         for media_asset in media_assets:
             media_path = media_asset["path"]
@@ -925,7 +1081,7 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                     "metadata": media_metadata,
                 }
             )
-        artifacts.append(video_artifact)
+        artifacts.extend([video_artifact, cover_artifact])
         if bool(manifest.get("audio", {}).get("subtitles", True)):
             subtitle_path = (artifact_dir / "subtitles.srt").resolve()
             cursor = 0.0
@@ -975,7 +1131,10 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                 )
         current["stage"] = "quality"
         current["progress"] = {"percent": 94, "message": "Running automatic quality checks", "updated_at": utc_now()}
-        store.save_job(current)
+        saved, active = store.save_job_if_active(current)
+        if not active or saved is None:
+            return
+        current = saved
         quality = _quality_report(output_path, manifest, props)
         report_path = (artifact_dir / "quality-report.json").resolve()
         report_path.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1004,13 +1163,19 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         )
         current["artifacts"] = artifacts
         current["quality_report"] = quality
-        store.save_job(current)
+        saved, active = store.save_job_if_active(current)
+        if not active or saved is None:
+            return
+        current = saved
         if quality["status"] != "passed":
             raise QualityGateError(quality)
         current["status"] = "succeeded"
         current["stage"] = "delivery"
         current["progress"] = {"percent": 100, "message": "Video ready", "updated_at": utc_now()}
-        store.save_job(current)
+        saved, active = store.save_job_if_active(current)
+        if not active or saved is None:
+            return
+        current = saved
         for artifact in artifacts:
             store.append_event(
                 current,
@@ -1034,7 +1199,10 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             "failed_checks": exc.report.get("failed_checks") or [],
         }
         current["progress"] = {"percent": 94, "message": "Quality checks failed", "updated_at": utc_now()}
-        store.save_job(current)
+        saved, active = store.save_job_if_active(current)
+        if not active or saved is None:
+            return
+        current = saved
         store.append_event(current, "job.failed", {"code": "QUALITY_GATE_FAILED", "failed_checks": exc.report.get("failed_checks") or []})
     except Exception as exc:
         logger.exception("Video render failed for job %s", job_id)
@@ -1052,5 +1220,8 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             "retryable": True,
         }
         current["progress"] = {"percent": max(72, current["progress"]["percent"]), "message": "Render failed", "updated_at": utc_now()}
-        store.save_job(current)
+        saved, active = store.save_job_if_active(current)
+        if not active or saved is None:
+            return
+        current = saved
         store.append_event(current, "job.failed", {"code": code, "stage": failed_stage, "diagnostic": type(exc).__name__})

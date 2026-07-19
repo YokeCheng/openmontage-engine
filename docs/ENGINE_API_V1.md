@@ -199,6 +199,14 @@ source .env
 FFmpeg `atempo` 自动适配且登记原始时长、适配时长、倍率和镜头时间区间，
 超过安全倍率则返回明确失败，不能通过截断或挪到其他镜头伪装成功。
 
+正式渲染直接执行 `remotion-composer/node_modules/@remotion/cli/remotion-cli.js`，
+不使用可能等待安装确认或访问网络的交互式 `npx`。默认并发不超过 8，使用
+ANGLE GL 和 `veryfast` x264 preset；可以通过
+`OPENMONTAGE_REMOTION_CONCURRENCY`、`OPENMONTAGE_REMOTION_GL`、
+`OPENMONTAGE_REMOTION_X264_PRESET` 与 `OPENMONTAGE_REMOTION_TIMEOUT_SECONDS`
+在部署环境显式覆盖。成功后使用 FFmpeg 从成片提取 JPEG 封面，并与 MP4、
+SRT、报告及中间音频统一登记校验值和媒体元数据。
+
 可选 `credential_grants` 是只写字段，只能携带任务范围、短时有效的凭证或不透明引用。引擎不得在任务快照、日志、事件、异常或产物中返回或明文持久化该字段。
 
 相同租户和 `Idempotency-Key`：
@@ -235,7 +243,9 @@ created → planning → running → waiting_approval → running
 约束：
 
 - `progress.percent` 在单个任务生命周期中不得倒退；
-- 取消为协作式操作，正在运行的外部调用可能需要短暂收尾；
+- 取消为协作式操作，正在运行的外部调用可能需要短暂收尾；Remotion/FFmpeg
+  子进程必须按进程组终止，且终态保存必须拒绝旧线程把 `cancelled` 改回
+  `succeeded`；
 - 终态不可恢复；如需重做，创建新任务并通过 `parent_job_id` 关联；
 - 内部 checkpoint 的 `awaiting_human` 映射为 `waiting_approval`，`completed` 仅代表阶段完成，不直接等同于任务成功；
 - 每次状态变化必须先持久化任务快照，再写入对应事件。

@@ -66,6 +66,21 @@ class EngineStore:
             self._atomic_json(self._snapshot_path(job["job_id"]), job)
             return deepcopy(job)
 
+    def save_job_if_active(self, job: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """Persist a worker update without overwriting a concurrent terminal state.
+
+        Render threads work outside the store lock. Cancellation can therefore
+        win while a thread is preparing media or starting Remotion. The final
+        status check and write must be one atomic operation; otherwise a stale
+        ``rendering`` snapshot can resurrect a cancelled job.
+        """
+
+        with self._lock:
+            current = self.load_job(str(job["job_id"]))
+            if current is None or current.get("status") in TERMINAL:
+                return deepcopy(current), False
+            return self.save_job(job), True
+
     def list_jobs(self, tenant_id: str) -> list[dict[str, Any]]:
         return [job for job in self.list_all_jobs() if job.get("tenant_id") == tenant_id]
 

@@ -18,6 +18,7 @@ from engine_api.renderer import (
     _media_artifact_metadata,
     _public_asset_src,
     _quality_report,
+    _remotion_command,
     _render_contract,
 )
 from engine_api.store import EngineStore, new_id, utc_now
@@ -82,6 +83,33 @@ def test_render_contract_keeps_legacy_manifest_fallback() -> None:
     composition_id, props = _render_contract(manifest())
     assert composition_id == "CouncilForgePlatform"
     assert props["title"] == "CouncilForge"
+
+
+def test_engine_render_uses_pinned_non_interactive_remotion_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    cli = repo_root / "remotion-composer" / "node_modules" / ".bin" / "remotion"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    monkeypatch.setenv("OPENMONTAGE_REMOTION_CONCURRENCY", "8")
+
+    command = _remotion_command(
+        repo_root,
+        composition_id="Explainer",
+        output_path=tmp_path / "final.mp4",
+        props_path=tmp_path / "render-props.json",
+        public_dir=tmp_path / "job",
+    )
+
+    assert command[0] == str(cli.resolve())
+    assert command[1:4] == ["render", "src/index.tsx", "Explainer"]
+    assert "npx" not in command
+    assert f"--public-dir={tmp_path / 'job'}" in command
+    assert "--concurrency=8" in command
+    assert "--gl=angle" in command
+    assert "--x264-preset=veryfast" in command
 
 
 def test_real_tts_artifact_metadata_includes_ffprobe_audio_details(tmp_path: Path) -> None:
@@ -976,6 +1004,10 @@ def test_approval_is_idempotent_and_render_registers_range_artifact(client: Test
         time.sleep(0.05)
     assert current["status"] == "succeeded"
     assert current["artifacts"][0]["checksum"]["algorithm"] == "sha256"
+    cover = next(item for item in current["artifacts"] if item["kind"] == "image")
+    assert cover["role"] == "final"
+    assert cover["media_type"] == "image/jpeg"
+    assert cover["metadata"]["image_format"] == "JPEG"
     artifact_id = current["artifacts"][0]["artifact_id"]
     ranged = client.get(
         f"/v1/jobs/{job['job_id']}/artifacts/{artifact_id}/content",
