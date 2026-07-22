@@ -748,6 +748,11 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             for item in (job.get("input", {}).get("source_materials") or [])
             if isinstance(item, dict) and str(item.get("platform_asset_id") or "") == asset_id
         ]
+        declarations.extend(
+            item
+            for item in (job.get("input", {}).get("reuse_assets") or [])
+            if isinstance(item, dict) and str(item.get("asset_id") or "") == asset_id
+        )
         if not declarations:
             return problem(404, "Source input not found", "The requested source input is not declared by this job.", "SOURCE_INPUT_NOT_FOUND", request)
         expected_checksum = str(x_content_sha256 or declarations[0].get("checksum_sha256") or "").lower()
@@ -821,6 +826,11 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
             for item in (job.get("input", {}).get("source_materials") or [])
             if isinstance(item, dict) and str(item.get("platform_asset_id") or "").strip()
         }
+        required.update(
+            str(item.get("asset_id"))
+            for item in (job.get("input", {}).get("reuse_assets") or [])
+            if isinstance(item, dict) and str(item.get("asset_id") or "").strip()
+        )
         uploaded = {str(item.get("asset_id")) for item in job.get("inputs", [])}
         missing = sorted(required - uploaded)
         if missing:

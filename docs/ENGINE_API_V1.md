@@ -214,6 +214,20 @@ SRT、报告及中间音频统一登记校验值和媒体元数据。
 - 请求体摘要相同：返回已创建任务，不重复执行；
 - 请求体摘要不同：返回 `409 IDEMPOTENCY_KEY_REUSED`。
 
+### 4.1.1 版本重做的复用输入
+
+平台从不可变父版本派生镜头重做时，可以在 `input.reuse_assets` 声明由
+CouncilForge 延迟上传的媒体。引擎必须同时验证租户 Job 路径、`scene_id`、
+媒体类型、字节数和 SHA-256；跨场景声明、重复声明、缺失文件或校验值不一致
+均拒绝执行。复用成功后追加一次 `media.asset_reused` 事件，产物 metadata 至少
+包含 `scene_id`、`reused=true`、`reused_from_artifact_id` 和
+`provider_call=false`。
+
+复用旁白不调用 TTS、不产生供应商费用，也不再次执行时间轴速度适配；父版本
+归档的音频已经是可直接放入同一镜头时间窗的确定性输入。变化镜头按任务清单
+正常生成，完整 MP4 重新合成。版本谱系、当前版本指针、历史播放和无渲染恢复
+属于 CouncilForge 的 PostgreSQL 业务状态，不由 OpenMontage 维护。
+
 ### 4.2 状态机
 
 ```text

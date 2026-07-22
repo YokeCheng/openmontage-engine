@@ -212,6 +212,19 @@ def _materialize_media(
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     aspect_ratio = str((manifest.get("render") or {}).get("aspect_ratio") or "16:9")
     approved_inputs = _apply_bound_source_inputs(manifest, props, public_dir, store, job)
+    reuse_by_scene: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for declaration in manifest.get("reuse_assets") or []:
+        if not isinstance(declaration, dict) or declaration.get("kind") != "narration":
+            continue
+        scene_id = str(declaration.get("scene_id") or "")
+        source_scene_id = str(declaration.get("source_scene_id") or scene_id)
+        if scene_id != source_scene_id:
+            raise ValueError("REUSE_ASSET_SCENE_MISMATCH")
+        if scene_id in reuse_by_scene:
+            raise ValueError("REUSE_ASSET_SCENE_DUPLICATE")
+        source_input = approved_inputs.get(str(declaration.get("asset_id") or ""))
+        if scene_id and source_input is not None:
+            reuse_by_scene[scene_id] = (declaration, source_input)
     if source_mode == "motion_graphics" and voice_provider == "none" and music_provider == "none":
         return []
 
@@ -384,12 +397,24 @@ def _materialize_media(
             # without adding Agent/model calls or changing scene decisions.
             tts_results: dict[int, Any | None] = {}
             pending_tts: dict[int, Any] = {}
-            tts_inputs: list[tuple[int, str, Path]] = []
+            tts_inputs: list[tuple[int, str, Path, str]] = []
             for index, scene in enumerate(scenes):
                 narration = str(scene.get("narration") or "").strip()
+                scene_id = str(scene.get("scene_id") or f"scene-{index + 1:02d}")
                 narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
-                if narration and not (narration_path.is_file() and narration_path.stat().st_size > 0):
-                    tts_inputs.append((index, narration, narration_path))
+                if (
+                    narration
+                    and scene_id not in reuse_by_scene
+                    and not (narration_path.is_file() and narration_path.stat().st_size > 0)
+                ):
+                    tts_inputs.append(
+                        (
+                            index,
+                            narration,
+                            narration_path,
+                            str(scene.get("voice") or voice_provider),
+                        )
+                    )
             def execute_tts(inputs: dict[str, Any]) -> Any:
                 result: Any = None
                 for attempt in range(1, 4):
@@ -404,12 +429,12 @@ def _materialize_media(
                 # limit while still collapsing six serial network round trips
                 # into two waves. Retry only the failed request in-place.
                 with ThreadPoolExecutor(max_workers=min(3, len(tts_inputs)), thread_name_prefix="tts") as pool:
-                    for index, narration, narration_path in tts_inputs:
+                    for index, narration, narration_path, scene_voice_provider in tts_inputs:
                         pending_tts[index] = pool.submit(
                             execute_tts,
                             {
                                 "text": narration,
-                                "preferred_provider": voice_provider,
+                                "preferred_provider": scene_voice_provider,
                                 "speed": float((manifest.get("audio") or {}).get("voice_speed") or 1),
                                 "output_path": str(narration_path),
                             },
@@ -438,7 +463,31 @@ def _materialize_media(
                 # make burned-in captions line up with the spoken content.
                 narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
                 narration_receipt = asset_dir / f"narration-{index + 1:02d}.receipt.json"
-                if index not in tts_results and narration_path.is_file() and narration_path.stat().st_size > 0:
+                reused = reuse_by_scene.get(scene_id)
+                if reused is not None:
+                    declaration, source_input = reused
+                    narration_asset = {
+                        "path": source_input["path"],
+                        "kind": "audio",
+                        "tool": "artifact_reuse",
+                        "provider": "councilforge-minio",
+                        "cost_usd": 0.0,
+                        "metadata": {
+                            "reused": True,
+                            "reused_from_artifact_id": declaration.get("platform_artifact_id"),
+                            "provider_call": False,
+                        },
+                    }
+                    store.append_event(
+                        job,
+                        "media.asset_reused",
+                        {
+                            "scene_id": scene_id,
+                            "kind": "narration",
+                            "source_artifact_id": declaration.get("platform_artifact_id"),
+                        },
+                    )
+                elif index not in tts_results and narration_path.is_file() and narration_path.stat().st_size > 0:
                     receipt: dict[str, Any] = {}
                     if narration_receipt.is_file():
                         try:
@@ -483,14 +532,27 @@ def _materialize_media(
                     continue
 
                 target_duration = max(0.25, scene_duration - 0.35)
-                fitted_path, fit_metadata = _fit_audio_to_timeline(
-                    narration_asset["path"],
-                    target_duration_seconds=target_duration,
-                    output_path=asset_dir / f"narration-{index + 1:02d}-timeline.wav",
-                )
+                if reused is not None:
+                    # A reusable narration artifact is the already-approved,
+                    # timeline-fitted output of an immutable earlier version.
+                    # Re-encoding it against the same scene boundary can
+                    # introduce rounding drift and destroys byte-level reuse.
+                    fitted_path = Path(narration_asset["path"]).resolve()
+                    fit_metadata = {
+                        "timeline_repaired": False,
+                        "timeline_fit_reused": True,
+                        "timeline_speed_factor": 1.0,
+                    }
+                else:
+                    fitted_path, fit_metadata = _fit_audio_to_timeline(
+                        narration_asset["path"],
+                        target_duration_seconds=target_duration,
+                        output_path=asset_dir / f"narration-{index + 1:02d}-timeline.wav",
+                    )
                 scene_end = cursor_seconds + scene_duration
                 narration_asset["path"] = fitted_path
                 narration_asset["metadata"] = {
+                    **(narration_asset.get("metadata") or {}),
                     **fit_metadata,
                     "scene_id": scene_id,
                     "timeline_start_seconds": round(cursor_seconds, 3),

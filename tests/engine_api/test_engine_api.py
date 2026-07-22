@@ -360,6 +360,176 @@ def test_real_tts_is_materialized_per_scene_on_the_approved_timeline(
     assert (tmp_path / "job" / "assets" / "narration-01.receipt.json").is_file()
 
 
+def test_shot_revision_reuses_unchanged_narration_and_calls_tts_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeTtsSelector:
+        def __init__(self) -> None:
+            self.inputs: list[dict] = []
+
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            self.inputs.append(inputs)
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"RIFF-new-scene")
+            return ToolResult(
+                success=True,
+                data={"output_path": str(output), "selected_provider": "dashscope"},
+                artifacts=[str(output)],
+                cost_usd=0.002,
+            )
+
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "motion_graphics",
+        "voice_provider": "dashscope",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["audio"] = {"voice": "auto", "voice_speed": 1, "music": "none"}
+    payload["render"]["duration_seconds"] = 5
+    payload["scenes"] = [
+        {
+            "scene_id": "scene-01",
+            "title": "保留",
+            "duration_seconds": 2,
+            "narration": "沿用第一句。",
+            "visual": {"type": "motion_graphics", "prompt": "保留"},
+        },
+        {
+            "scene_id": "scene-02",
+            "title": "重做",
+            "duration_seconds": 3,
+            "narration": "这是修改后的第二句。",
+            "visual": {"type": "motion_graphics", "prompt": "重做"},
+        },
+    ]
+    payload["reuse_assets"] = [
+        {
+            "asset_id": "reuse-audio-01",
+            "platform_artifact_id": "artifact-audio-v1",
+            "scene_id": "scene-01",
+            "kind": "narration",
+        }
+    ]
+    job_dir = tmp_path / "job"
+    reused_path = job_dir / "inputs" / "reuse-audio-01" / "narration.wav"
+    reused_path.parent.mkdir(parents=True)
+    reused_path.write_bytes(b"RIFF-reused-scene")
+    job = {
+        "job_id": "job-shot-redo",
+        "tenant_id": "tenant-shot-redo",
+        "inputs": [
+            {
+                "asset_id": "reuse-audio-01",
+                "storage_name": "inputs/reuse-audio-01/narration.wav",
+            }
+        ],
+    }
+    props: dict = {"cuts": [{}, {}], "audio": {}}
+    fake = FakeTtsSelector()
+
+    from engine_api import renderer
+    from tools.tool_registry import registry
+
+    original_get = registry.get
+    monkeypatch.setattr(registry, "get", lambda name: fake if name == "tts_selector" else original_get(name))
+    fit_calls: list[Path] = []
+
+    def fit_once(source_path: Path, *, target_duration_seconds: float, output_path: Path):
+        fit_calls.append(Path(source_path))
+        return (
+            Path(source_path).resolve(),
+            {
+                "timeline_repaired": False,
+                "original_duration_seconds": target_duration_seconds,
+                "fitted_duration_seconds": target_duration_seconds,
+                "timeline_speed_factor": 1.0,
+            },
+        )
+
+    monkeypatch.setattr(
+        renderer,
+        "_fit_audio_to_timeline",
+        fit_once,
+    )
+
+    assets = _materialize_media(
+        payload,
+        props,
+        job_dir / "assets",
+        EngineStore(tmp_path / "runtime"),
+        job,
+    )
+
+    assert [item["text"] for item in fake.inputs] == ["这是修改后的第二句。"]
+    assert [asset["metadata"]["scene_id"] for asset in assets] == ["scene-01", "scene-02"]
+    assert assets[0]["metadata"]["reused"] is True
+    assert assets[0]["metadata"]["provider_call"] is False
+    assert assets[0]["cost_usd"] == 0
+    assert assets[1]["cost_usd"] == 0.002
+    assert fit_calls == [job_dir / "assets" / "narration-02.wav"]
+
+
+def test_shot_revision_rejects_cross_scene_narration_reuse(
+    tmp_path: Path,
+) -> None:
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "motion_graphics",
+        "voice_provider": "dashscope",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["audio"] = {"voice": "auto", "voice_speed": 1, "music": "none"}
+    payload["scenes"] = [
+        {
+            "scene_id": "scene-01",
+            "title": "第一镜头",
+            "duration_seconds": 5,
+            "narration": "第一镜头旁白。",
+            "visual": {"type": "motion_graphics", "prompt": "第一镜头"},
+        }
+    ]
+    payload["reuse_assets"] = [
+        {
+            "asset_id": "reuse-audio-02",
+            "platform_artifact_id": "artifact-audio-v1-scene-02",
+            "scene_id": "scene-01",
+            "source_scene_id": "scene-02",
+            "kind": "narration",
+        }
+    ]
+    job_dir = tmp_path / "job"
+    reused_path = job_dir / "inputs" / "reuse-audio-02" / "narration.wav"
+    reused_path.parent.mkdir(parents=True)
+    reused_path.write_bytes(b"RIFF-cross-scene")
+    job = {
+        "job_id": "job-cross-scene-reuse",
+        "tenant_id": "tenant-shot-redo",
+        "inputs": [
+            {
+                "asset_id": "reuse-audio-02",
+                "storage_name": "inputs/reuse-audio-02/narration.wav",
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="REUSE_ASSET_SCENE_MISMATCH"):
+        _materialize_media(
+            payload,
+            {"cuts": [{}], "audio": {}},
+            job_dir / "assets",
+            EngineStore(tmp_path / "runtime"),
+            job,
+        )
 def test_approved_image_policy_executes_registry_selector_and_updates_explainer_props(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Available:
         value = "available"
@@ -626,6 +796,59 @@ def test_platform_managed_job_accepts_verified_deferred_source_inputs(
     )
     assert started.status_code == 200
     assert started.json()["status"] == "running"
+
+
+def test_platform_managed_job_requires_declared_reuse_inputs(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    asset_id = "asset_abcdefabcdefabcdefabcdefabcdefab"
+    payload = b"RIFF-reused-narration"
+    checksum = hashlib.sha256(payload).hexdigest()
+    body = request_body(execution_mode="platform_managed")
+    body["defer_start"] = True
+    body["input"]["reuse_assets"] = [
+        {
+            "asset_id": asset_id,
+            "platform_artifact_id": "artifact-audio-v1",
+            "scene_id": "scene-01",
+            "kind": "narration",
+            "media_type": "audio/wav",
+            "checksum_sha256": checksum,
+        }
+    ]
+    created = client.post(
+        "/v1/jobs",
+        json=body,
+        headers=headers(key="deferred-reuse-input"),
+    )
+    assert created.status_code == 202
+    job = created.json()
+    missing = client.post(
+        f"/v1/jobs/{job['job_id']}/start",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert missing.status_code == 409
+    assert asset_id in missing.json()["detail"]
+    uploaded = client.put(
+        f"/v1/jobs/{job['job_id']}/inputs/{asset_id}",
+        headers={
+            "X-Tenant-ID": "tenant-a",
+            "X-File-Name": "narration.wav",
+            "X-Content-SHA256": checksum,
+            "Content-Type": "audio/wav",
+        },
+        content=payload,
+    )
+    assert uploaded.status_code == 201
+    monkeypatch.setattr(client.app.state.scheduler, "submit", lambda _job_id: None)
+    started = client.post(
+        f"/v1/jobs/{job['job_id']}/start",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    assert started.status_code == 200
 
 
 def test_bound_source_image_is_materialized_as_a_remotion_background(tmp_path: Path) -> None:

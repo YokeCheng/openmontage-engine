@@ -82,6 +82,8 @@ GET  /v1/jobs/{job_id}/artifacts
 GET  /v1/jobs/{job_id}/artifacts/{artifact_id}/content
 ```
 
+`animated-explainer v1.3` 的镜头重做仍通过新 Job 执行。CouncilForge 在已批准清单中声明并上传未变镜头的复用媒体；OpenMontage 校验租户 Job 路径、场景、媒体类型、大小和 SHA-256 后才接受输入。复用旁白会产生 `media.asset_reused` 事件，并在产物 metadata 标记 `reused=true`、来源产物和 `provider_call=false`；它不再次调用 TTS，也不对已经按时间线适配的音频重复转码。变化镜头正常生成，最终 MP4 仍重新合成并登记独立校验值。版本谱系、当前版本和历史恢复由 CouncilForge PostgreSQL 管理，引擎不建立第二套业务版本数据库。
+
 历史阶段式任务和后续高级 Pipeline 仍可使用能力 Workspace：
 
 ```text
