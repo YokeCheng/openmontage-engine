@@ -76,13 +76,58 @@ class VideoScene(BaseModel):
     visual: SceneVisual = Field(default_factory=SceneVisual)
 
 
+class ReframeInstruction(BaseModel):
+    """Normalized focal geometry for one delivery-variant scene."""
+
+    model_config = ConfigDict(extra="forbid")
+    scene_id: str = Field(min_length=1, max_length=128)
+    focal_point: tuple[float, float] = (0.5, 0.5)
+    safe_region: tuple[float, float, float, float] = (0.05, 0.05, 0.9, 0.9)
+    motion_region: tuple[float, float, float, float] | None = None
+    allow_crop: bool = True
+    allow_padding: bool = True
+
+    @model_validator(mode="after")
+    def validate_geometry(self) -> "ReframeInstruction":
+        x, y = self.focal_point
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise ValueError("focal_point must use normalized coordinates")
+        for name, region in (
+            ("safe_region", self.safe_region),
+            ("motion_region", self.motion_region),
+        ):
+            if region is None:
+                continue
+            left, top, width, height = region
+            if (
+                left < 0
+                or top < 0
+                or width <= 0
+                or height <= 0
+                or left + width > 1
+                or top + height > 1
+            ):
+                raise ValueError(f"{name} must fit normalized frame bounds")
+        return self
+
+
 class RenderSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
-    aspect_ratio: Literal["16:9", "9:16"] = "16:9"
+    aspect_ratio: Literal["16:9", "9:16", "1:1"] = "16:9"
     width: int = Field(default=1920, ge=320, le=3840)
     height: int = Field(default=1080, ge=320, le=3840)
     fps: int = Field(default=30, ge=12, le=60)
     duration_seconds: float = Field(default=30, gt=0, le=600)
+
+    @model_validator(mode="after")
+    def normalize_standard_dimensions(self) -> "RenderSpec":
+        if not {"width", "height"}.issubset(self.model_fields_set):
+            self.width, self.height = {
+                "16:9": (1920, 1080),
+                "9:16": (1080, 1920),
+                "1:1": (1080, 1080),
+            }[self.aspect_ratio]
+        return self
 
 
 class VideoExecutionManifest(BaseModel):

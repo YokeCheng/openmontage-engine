@@ -18,7 +18,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .models import MusicRequest
+from .models import MusicRequest, ReframeInstruction, RenderSpec
 from .quality import evaluate_media
 from .store import EngineStore, new_id, utc_now
 from tools.base_tool import ToolResult
@@ -1120,11 +1120,54 @@ def _render_contract(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     deterministic Remotion composition.
     """
 
+    render = RenderSpec.model_validate(manifest.get("render") or {}).model_dump(
+        mode="json"
+    )
+    delivery = manifest.get("delivery")
+    instructions = (
+        delivery.get("reframe_instructions")
+        if isinstance(delivery, dict)
+        else []
+    )
+    reframe_by_scene: dict[str, ReframeInstruction] = {}
+    for raw_instruction in instructions or []:
+        instruction = ReframeInstruction.model_validate(raw_instruction)
+        reframe_by_scene[instruction.scene_id] = instruction
+
     artifacts = manifest.get("pipeline_artifacts")
     edit_decisions = artifacts.get("edit_decisions") if isinstance(artifacts, dict) else None
     if isinstance(edit_decisions, dict) and isinstance(edit_decisions.get("cuts"), list) and edit_decisions["cuts"]:
         props = deepcopy(edit_decisions)
-        props["render"] = deepcopy(manifest["render"])
+        props["render"] = render
+        for cut in props["cuts"]:
+            if not isinstance(cut, dict):
+                continue
+            instruction = reframe_by_scene.get(
+                str(cut.get("id") or cut.get("scene_id") or "")
+            )
+            if instruction is None:
+                continue
+            focal_x, focal_y = instruction.focal_point
+            safe_x, safe_y, safe_width, safe_height = instruction.safe_region
+            cut["focalPoint"] = {"x": focal_x, "y": focal_y}
+            cut["safeRegion"] = {
+                "x": safe_x,
+                "y": safe_y,
+                "width": safe_width,
+                "height": safe_height,
+            }
+            if instruction.motion_region is not None:
+                motion_x, motion_y, motion_width, motion_height = (
+                    instruction.motion_region
+                )
+                cut["motionRegion"] = {
+                    "x": motion_x,
+                    "y": motion_y,
+                    "width": motion_width,
+                    "height": motion_height,
+                }
+            cut["allowCrop"] = instruction.allow_crop
+            cut["allowPadding"] = instruction.allow_padding
         return "Explainer", props
     return (
         "CouncilForgePlatform",
@@ -1134,7 +1177,7 @@ def _render_contract(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "format": manifest["format"],
             "language": manifest.get("language", "zh-CN"),
             "scenes": manifest["scenes"],
-            "render": manifest["render"],
+            "render": render,
         },
     )
 
