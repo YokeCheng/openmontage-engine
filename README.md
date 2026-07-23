@@ -8,6 +8,8 @@ OpenMontage Engine 是 CouncilForge 的独立视频执行引擎，基于 [calest
 
 > 上游 CLI、Backlot、工具和 Pipeline 保持不变；`engine_api/` 是无模型的能力边界。当前 `animated-explainer` 由 CouncilForge 一次生成并批准完整执行清单，再通过 `/v1/jobs` 交给引擎确定性执行；Workspace、阶段工具与 Checkpoint 协议继续保留给历史任务和后续高级 Pipeline。
 
+`animated-explainer v2.0` 的引擎边界包括逐镜头 AI 视频安全收据、授权音乐与标准化混音、场景/画幅质检、受影响镜头重做和焦点感知多画幅渲染。Brand Kit、预算、租户配额和 Batch 属于 CouncilForge；OpenMontage 只执行批准后的不可变清单，不持有平台业务状态。
+
 ## 系统边界
 
 ```text

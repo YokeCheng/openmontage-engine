@@ -1,3 +1,5 @@
+> **CouncilForge 下游说明：** 在 CouncilForge 产品架构中，OpenMontage 是无模型的视频执行引擎。Agent、模型、审批、Brand Kit、预算、配额、批量任务和长期产物由 CouncilForge 管理；本仓库负责 Pipeline、媒体工具、Remotion/FFmpeg、临时工作区、幂等收据和执行事件。
+
 <p align="center">
   <img src="assets/logo.png" alt="OpenMontage" width="200">
 </p>

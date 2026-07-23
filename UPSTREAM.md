@@ -19,6 +19,11 @@ OpenMontage Engine 是基于 OpenMontage 完整源码和 Git 历史维护的下�
 - 增加明确的上游版本锁定与升级规则；
 - 未修改 OpenMontage 核心功能、流水线或许可证。
 
+后续 `animated-explainer v2.0` 下游功能限定在无模型执行边界：
+AI 视频幂等收据、授权音乐混音、确定性质检、镜头复用重做和焦点感知
+多画幅渲染。CouncilForge 的 Agent、Brand Kit、预算、配额和 Batch
+不复制进本仓库；每次上游同步必须同时运行 Engine 契约和平台集成回归。
+
 ## 已完成验证
 
 - Python 契约测试：561 passed，7 skipped；
