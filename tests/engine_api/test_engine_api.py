@@ -246,7 +246,9 @@ def test_quality_report_rejects_black_and_silent_narrated_delivery(tmp_path: Pat
     )
 
     assert report["status"] == "failed"
-    assert {"black_frames", "silence"}.issubset(report["failed_checks"])
+    assert {"black_frames", "silence"}.issubset(
+        {item["code"] for item in report["failed_checks"]}
+    )
 
 
 def test_remotion_media_is_served_from_the_tenant_job_public_directory(tmp_path: Path) -> None:

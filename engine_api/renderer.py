@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MusicRequest
+from .quality import evaluate_media
 from .store import EngineStore, new_id, utc_now
 from tools.base_tool import ToolResult
 from tools.subtitle.subtitle_gen import SubtitleGen
@@ -1386,12 +1387,12 @@ def _media_artifact_metadata(media_path: Path, media_asset: dict[str, Any]) -> d
     return metadata
 
 
-def _quality_report(
+def _legacy_quality_report(
     output_path: Path,
     manifest: dict[str, Any],
     props: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run deterministic, vendor-independent checks on a rendered delivery."""
+    """Original aggregate report retained for downstream compatibility."""
 
     metadata = _ffprobe(output_path)
     render = manifest.get("render") if isinstance(manifest.get("render"), dict) else {}
@@ -1560,6 +1561,37 @@ def _quality_report(
         },
         "created_at": utc_now(),
     }
+
+
+def _quality_report(
+    output_path: Path,
+    manifest: dict[str, Any],
+    props: dict[str, Any],
+) -> dict[str, Any]:
+    """Run authoritative scene- and variant-level delivery checks."""
+
+    render = manifest.get("render") if isinstance(manifest.get("render"), dict) else {}
+    report = evaluate_media(
+        output_path,
+        manifest,
+        str(render.get("aspect_ratio") or "16:9"),
+        props,
+    )
+    report["created_at"] = utc_now()
+    return report
+
+
+def _should_raise_quality_gate(
+    job: dict[str, Any],
+    quality: dict[str, Any],
+) -> bool:
+    """Keep standalone engine behavior while delegating platform decisions."""
+
+    return (
+        str(quality.get("status") or "") != "passed"
+        and str(job.get("execution_mode") or "engine_managed")
+        != "platform_managed"
+    )
 
 
 def _render_failure_detail(exc: Exception) -> tuple[str, str]:
@@ -1783,6 +1815,10 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
             return
         current = saved
         quality = _quality_report(output_path, manifest, props)
+        video_artifact["metadata"] = {
+            **dict(video_artifact.get("metadata") or {}),
+            "quality": quality,
+        }
         report_path = (artifact_dir / "quality-report.json").resolve()
         report_path.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
         report_id = new_id("artifact")
@@ -1814,11 +1850,19 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         if not active or saved is None:
             return
         current = saved
-        if quality["status"] != "passed":
+        if _should_raise_quality_gate(current, quality):
             raise QualityGateError(quality)
         current["status"] = "succeeded"
         current["stage"] = "delivery"
-        current["progress"] = {"percent": 100, "message": "Video ready", "updated_at": utc_now()}
+        current["progress"] = {
+            "percent": 100,
+            "message": (
+                "Video rendered; platform quality decision required"
+                if quality["status"] != "passed"
+                else "Video ready"
+            ),
+            "updated_at": utc_now(),
+        }
         saved, active = store.save_job_if_active(current)
         if not active or saved is None:
             return
@@ -1829,6 +1873,12 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                 "artifact.created",
                 {"artifact_id": artifact["artifact_id"], "kind": artifact["kind"]},
             )
+        if quality["status"] != "passed":
+            store.append_event(
+                current,
+                "quality.revision_required",
+                {"failed_checks": quality["failed_checks"]},
+            )
         store.append_event(current, "job.succeeded", {"artifact_id": artifact_id})
     except MediaActionRequired:
         return
@@ -1836,7 +1886,12 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
         current = store.load_job(job_id)
         if not current or current["status"] == "cancelled":
             return
-        failed = ", ".join(exc.report.get("failed_checks") or [])
+        failed = ", ".join(
+            str(item.get("code") or item.get("name") or "quality_check")
+            if isinstance(item, dict)
+            else str(item)
+            for item in exc.report.get("failed_checks") or []
+        )
         current["status"] = "failed"
         current["stage"] = "quality"
         current["error"] = {
