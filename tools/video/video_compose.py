@@ -1490,9 +1490,10 @@ class VideoCompose(BaseTool):
         animated stills + text cards) is always composed in Remotion, which
         can embed <OffthreadVideo> alongside React components natively.
         """
-        # If Remotion isn't installed, fall back to FFmpeg
-        if not self._remotion_available():
-            return False
+        # ``render_runtime=remotion`` is an approved hard constraint.  Runtime
+        # availability is checked by ``_remotion_render`` so a missing install
+        # becomes an explicit blocker instead of silently routing still images
+        # into the FFmpeg-only ``compose`` operation.
 
         # Any rich content → Remotion (fast path, catches the obvious cases)
         for cut in cuts:
