@@ -940,13 +940,33 @@ def create_app(runtime_root: Path | None = None) -> FastAPI:
                 context = action.get("context") or {}
                 capability = context.get("capability")
                 policy = job.get("input", {}).setdefault("media_policy", {})
-                if capability in {"ai_image", "ai_video", "stock"}:
+                if capability == "ai_image":
+                    scene_id = str(context.get("scene_id") or "")
+                    target_scene = next(
+                        (
+                            scene
+                            for scene in job.get("input", {}).get("scenes", [])
+                            if isinstance(scene, dict)
+                            and str(scene.get("scene_id") or "") == scene_id
+                        ),
+                        None,
+                    )
+                    if target_scene is not None:
+                        visual = target_scene.setdefault("visual", {})
+                        visual["type"] = "motion_graphics"
+                        visual["fallback_applied"] = "use_motion_graphics"
+                    else:
+                        # Historical all-image manifests did not carry explicit
+                        # per-scene types, so retain their previous whole-job fallback.
+                        policy["visual_source"] = "motion_graphics"
+                elif capability in {"ai_video", "stock"}:
                     policy["visual_source"] = "motion_graphics"
                 elif capability == "tts":
                     policy["voice_provider"] = "none"
                 elif capability == "music_generation":
                     policy["music_provider"] = "none"
-                policy["fallback"] = "motion_graphics"
+                if capability != "ai_image":
+                    policy["fallback"] = "motion_graphics"
             job["status"] = "running"
             job["stage"] = "production"
             job["progress"] = {"percent": 48, "message": "Resuming approved production", "updated_at": utc_now()}

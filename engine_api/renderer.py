@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .store import EngineStore, new_id, utc_now
 from tools.subtitle.subtitle_gen import SubtitleGen
@@ -108,14 +108,73 @@ def _first_output(result: Any) -> Path | None:
     return None
 
 
-def _media_asset(path: Path, *, kind: str, result: Any, tool_name: str) -> dict[str, Any]:
-    return {
+def _image_generation_receipt_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.name}.generation.json")
+
+
+def _write_image_generation_receipt(
+    output_path: Path,
+    result: Any,
+    *,
+    default_tool: str,
+    default_provider: str,
+) -> None:
+    """Persist only billing/provenance needed to resume a partial image batch.
+
+    Provider responses may contain expiring signed URLs or other sensitive
+    fields, so the receipt deliberately records a small allowlist instead of
+    serializing ``ToolResult.data``.
+    """
+
+    receipt = {
+        "schema_version": "1.0",
+        "tool": str(result.data.get("selected_tool") or default_tool),
+        "provider": str(
+            result.data.get("selected_provider")
+            or result.data.get("provider")
+            or default_provider
+            or "local"
+        ),
+        "model": str(result.model or result.data.get("model") or ""),
+        "cost_usd": float(result.cost_usd or 0),
+        "duration_seconds": float(result.duration_seconds or 0),
+    }
+    path = _image_generation_receipt_path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{new_id('tmp')}")
+    temporary.write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _load_image_generation_receipt(output_path: Path) -> dict[str, Any] | None:
+    path = _image_generation_receipt_path(output_path)
+    if not path.is_file():
+        return None
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _media_asset(
+    path: Path,
+    *,
+    kind: str,
+    result: Any,
+    tool_name: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    asset = {
         "path": path,
         "kind": kind,
         "tool": str(result.data.get("selected_tool") or tool_name),
         "provider": str(result.data.get("selected_provider") or result.data.get("provider") or "local"),
         "cost_usd": float(result.cost_usd or 0),
     }
+    if metadata:
+        asset["metadata"] = metadata
+    return asset
 
 
 def _public_asset_src(path: Path, public_dir: Path) -> str:
@@ -212,19 +271,31 @@ def _materialize_media(
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     aspect_ratio = str((manifest.get("render") or {}).get("aspect_ratio") or "16:9")
     approved_inputs = _apply_bound_source_inputs(manifest, props, public_dir, store, job)
-    reuse_by_scene: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    reuse_by_scene_kind: dict[
+        tuple[str, str],
+        tuple[dict[str, Any], dict[str, Any]],
+    ] = {}
     for declaration in manifest.get("reuse_assets") or []:
-        if not isinstance(declaration, dict) or declaration.get("kind") != "narration":
+        if not isinstance(declaration, dict):
+            continue
+        kind = str(declaration.get("kind") or "")
+        if kind not in {"narration", "image"}:
             continue
         scene_id = str(declaration.get("scene_id") or "")
         source_scene_id = str(declaration.get("source_scene_id") or scene_id)
         if scene_id != source_scene_id:
             raise ValueError("REUSE_ASSET_SCENE_MISMATCH")
-        if scene_id in reuse_by_scene:
+        key = (kind, scene_id)
+        if key in reuse_by_scene_kind:
             raise ValueError("REUSE_ASSET_SCENE_DUPLICATE")
         source_input = approved_inputs.get(str(declaration.get("asset_id") or ""))
         if scene_id and source_input is not None:
-            reuse_by_scene[scene_id] = (declaration, source_input)
+            media_type = str(source_input.get("media_type") or "")
+            if kind == "image" and media_type and not media_type.startswith("image/"):
+                raise ValueError("REUSE_ASSET_MEDIA_TYPE_MISMATCH")
+            if kind == "narration" and media_type and not media_type.startswith("audio/"):
+                raise ValueError("REUSE_ASSET_MEDIA_TYPE_MISMATCH")
+            reuse_by_scene_kind[key] = (declaration, source_input)
     if source_mode == "motion_graphics" and voice_provider == "none" and music_provider == "none":
         return []
 
@@ -232,8 +303,29 @@ def _materialize_media(
 
     registry.ensure_discovered()
 
-    def fallback(scene_id: str, capability: str) -> None:
+    def fallback(
+        scene_id: str,
+        capability: str,
+        *,
+        provider: str | None = None,
+        result: Any | None = None,
+    ) -> None:
         if str(policy.get("fallback") or "ask") == "ask":
+            context: dict[str, Any] = {
+                "scene_id": scene_id,
+                "capability": capability,
+            }
+            if provider and provider != "auto":
+                context["provider"] = provider
+            raw_error = str(getattr(result, "error", "") or "").strip()
+            if raw_error:
+                from .capability_gateway import _redact_sensitive_text
+
+                context["provider_error"] = _redact_sensitive_text(raw_error)
+                error_code = str(getattr(result, "error_code", "") or "").strip()
+                if error_code:
+                    context["error_code"] = error_code
+                context["retryable"] = bool(getattr(result, "retryable", False))
             action_id = new_id("action")
             recommended_resolution = "retry" if capability == "tts" else "use_motion_graphics"
             action = {
@@ -257,7 +349,7 @@ def _materialize_media(
                     },
                     {"value": "cancel", "label": "Cancel job"},
                 ],
-                "context": {"scene_id": scene_id, "capability": capability},
+                "context": context,
                 "created_at": utc_now(),
             }
             job.setdefault("actions", []).append(action)
@@ -283,34 +375,68 @@ def _materialize_media(
         preferred = str(
             policy.get("image_provider" if source_mode == "ai_image" else "video_provider") or "auto"
         )
+        has_explicit_image_scenes = any(
+            isinstance(scene.get("visual"), dict)
+            and str(scene["visual"].get("type") or "") == "image"
+            and not str(scene["visual"].get("asset_id") or "").strip()
+            for scene in scenes
+        )
+        selected: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
         for index, (scene, cut) in enumerate(zip(scenes, cuts)):
+            visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+            if source_mode == "ai_image" and (
+                (has_explicit_image_scenes and str(visual.get("type") or "") != "image")
+                or str(visual.get("asset_id") or "").strip()
+            ):
+                continue
+            if source_mode == "ai_video" and str(visual.get("type") or "video") != "video":
+                continue
+            selected.append((index, scene, cut))
+
+        prepared: list[dict[str, Any]] = []
+        for index, scene, cut in selected:
             scene_id = str(scene.get("scene_id") or f"scene-{index + 1:02d}")
             if selector is None or selector.get_status().value != "available":
-                fallback(scene_id, source_mode)
+                fallback(scene_id, source_mode, provider=preferred)
                 continue
             suffix = ".png" if source_mode == "ai_image" else ".mp4"
             output_path = asset_dir / f"{scene_id}{suffix}"
-            if output_path.is_file() and output_path.stat().st_size > 0:
-                field = "backgroundImage" if source_mode == "ai_image" else "backgroundVideo"
-                cut[field] = _public_asset_src(output_path, public_dir)
-                cut["backgroundOverlay"] = 0.45
-                media_assets.append(
+            visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+            image_reuse = reuse_by_scene_kind.get(("image", scene_id))
+            if source_mode == "ai_image" and image_reuse is not None:
+                declaration, source_input = image_reuse
+                prepared.append(
                     {
+                        "scene_id": scene_id,
+                        "scene": scene,
+                        "cut": cut,
+                        "path": source_input["path"],
+                        "reuse": (declaration, source_input),
+                        "cached": False,
+                    }
+                )
+                continue
+            if output_path.is_file() and output_path.stat().st_size > 0:
+                prepared.append(
+                    {
+                        "scene_id": scene_id,
+                        "scene": scene,
+                        "cut": cut,
                         "path": output_path.resolve(),
-                        "kind": "image" if source_mode == "ai_image" else "video",
-                        "tool": "cached",
-                        "provider": preferred,
-                        "cost_usd": 0.0,
+                        "cached": True,
+                        "generation_receipt": _load_image_generation_receipt(output_path),
                     }
                 )
                 continue
             inputs: dict[str, Any] = {
-                "prompt": str((scene.get("visual") or {}).get("prompt") or scene.get("title") or ""),
+                "prompt": str(visual.get("prompt") or scene.get("title") or ""),
                 "preferred_provider": preferred,
                 "aspect_ratio": aspect_ratio,
                 "output_path": str(output_path),
                 "scene_id": scene_id,
             }
+            if source_mode == "ai_image" and preferred != "auto":
+                inputs["allowed_providers"] = [preferred]
             if source_mode == "ai_video":
                 inputs.update(
                     {
@@ -318,10 +444,141 @@ def _materialize_media(
                         "duration": str(max(1, min(10, round(float(scene.get("duration_seconds") or 5))))),
                     }
                 )
-            result = selector.execute(inputs)
-            path = _first_output(result) if result.success else None
+            prepared.append(
+                {
+                    "scene_id": scene_id,
+                    "scene": scene,
+                    "cut": cut,
+                    "path": output_path,
+                    "inputs": inputs,
+                    "cached": False,
+                }
+            )
+
+        generated_results: dict[str, Any] = {}
+        pending = [
+            item
+            for item in prepared
+            if not item["cached"] and item.get("reuse") is None
+        ]
+        if source_mode == "ai_image" and pending:
+            with ThreadPoolExecutor(
+                max_workers=min(3, len(pending)),
+                thread_name_prefix="image",
+            ) as pool:
+                futures = {
+                    item["scene_id"]: pool.submit(selector.execute, item["inputs"])
+                    for item in pending
+                }
+                for item in pending:
+                    try:
+                        generated_results[item["scene_id"]] = futures[item["scene_id"]].result()
+                    except Exception:
+                        logger.exception("Image provider failed for %s", item["scene_id"])
+                        generated_results[item["scene_id"]] = None
+        elif pending:
+            for item in pending:
+                try:
+                    generated_results[item["scene_id"]] = selector.execute(item["inputs"])
+                except Exception:
+                    logger.exception("Video provider failed for %s", item["scene_id"])
+                    generated_results[item["scene_id"]] = None
+
+        if source_mode == "ai_image":
+            for item in pending:
+                result = generated_results.get(item["scene_id"])
+                path = _first_output(result) if result is not None and result.success else None
+                if path is not None:
+                    _write_image_generation_receipt(
+                        path,
+                        result,
+                        default_tool=selector_name,
+                        default_provider=preferred,
+                    )
+
+        for item in prepared:
+            scene_id = item["scene_id"]
+            scene = item["scene"]
+            visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+            cut = item["cut"]
+            if item.get("reuse") is not None:
+                declaration, _source_input = item["reuse"]
+                cut["backgroundImage"] = _public_asset_src(item["path"], public_dir)
+                cut["backgroundOverlay"] = 0.45
+                media_assets.append(
+                    {
+                        "path": item["path"],
+                        "kind": "image",
+                        "tool": "artifact_reuse",
+                        "provider": "councilforge-minio",
+                        "cost_usd": 0.0,
+                        "metadata": {
+                            "scene_id": scene_id,
+                            "prompt": str(visual.get("prompt") or ""),
+                            "selection_reason": str(visual.get("selection_reason") or ""),
+                            "ai_image_score": float(visual.get("ai_image_score") or 0),
+                            "reused": True,
+                            "reused_from_artifact_id": declaration.get("platform_artifact_id"),
+                            "provider_call": False,
+                        },
+                    }
+                )
+                store.append_event(
+                    job,
+                    "media.asset_reused",
+                    {
+                        "scene_id": scene_id,
+                        "kind": "image",
+                        "source_artifact_id": declaration.get("platform_artifact_id"),
+                    },
+                )
+                continue
+            if item["cached"]:
+                field = "backgroundImage" if source_mode == "ai_image" else "backgroundVideo"
+                cut[field] = _public_asset_src(item["path"], public_dir)
+                cut["backgroundOverlay"] = 0.45
+                receipt = item.get("generation_receipt")
+                recovered_generation = source_mode == "ai_image" and isinstance(receipt, dict)
+                media_assets.append(
+                    {
+                        "path": item["path"],
+                        "kind": "image" if source_mode == "ai_image" else "video",
+                        "tool": str(receipt.get("tool") or "cached") if recovered_generation else "cached",
+                        "provider": str(receipt.get("provider") or preferred) if recovered_generation else preferred,
+                        "cost_usd": float(receipt.get("cost_usd") or 0) if recovered_generation else 0.0,
+                        "metadata": {
+                            "scene_id": scene_id,
+                            "prompt": str(visual.get("prompt") or ""),
+                            "selection_reason": str(visual.get("selection_reason") or ""),
+                            "ai_image_score": float(visual.get("ai_image_score") or 0),
+                            "model": str(receipt.get("model") or "") if recovered_generation else "",
+                            "generation_duration_seconds": (
+                                float(receipt.get("duration_seconds") or 0)
+                                if recovered_generation
+                                else 0.0
+                            ),
+                            "provider_call": bool(recovered_generation),
+                            "reused": not recovered_generation,
+                            "resumed_from_cached_generation": bool(recovered_generation),
+                        },
+                    }
+                )
+                if recovered_generation:
+                    store.append_event(
+                        job,
+                        "media.asset_recovered",
+                        {
+                            "scene_id": scene_id,
+                            "kind": "image",
+                            "provider": str(receipt.get("provider") or preferred),
+                            "cost_usd": float(receipt.get("cost_usd") or 0),
+                        },
+                    )
+                continue
+            result = generated_results.get(scene_id)
+            path = _first_output(result) if result is not None and result.success else None
             if path is None:
-                fallback(scene_id, source_mode)
+                fallback(scene_id, source_mode, provider=preferred, result=result)
                 continue
             field = "backgroundImage" if source_mode == "ai_image" else "backgroundVideo"
             cut[field] = _public_asset_src(path, public_dir)
@@ -331,6 +588,16 @@ def _materialize_media(
                 kind="image" if source_mode == "ai_image" else "video",
                 result=result,
                 tool_name=selector_name,
+                metadata={
+                    "scene_id": scene_id,
+                    "prompt": str(visual.get("prompt") or ""),
+                    "selection_reason": str(visual.get("selection_reason") or ""),
+                    "ai_image_score": float(visual.get("ai_image_score") or 0),
+                    "model": str(result.model or result.data.get("model") or ""),
+                    "generation_duration_seconds": float(result.duration_seconds or 0),
+                    "provider_call": True,
+                    "reused": False,
+                },
             )
             media_assets.append(asset)
             store.append_event(
@@ -404,7 +671,7 @@ def _materialize_media(
                 narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
                 if (
                     narration
-                    and scene_id not in reuse_by_scene
+                    and ("narration", scene_id) not in reuse_by_scene_kind
                     and not (narration_path.is_file() and narration_path.stat().st_size > 0)
                 ):
                     tts_inputs.append(
@@ -463,7 +730,7 @@ def _materialize_media(
                 # make burned-in captions line up with the spoken content.
                 narration_path = asset_dir / f"narration-{index + 1:02d}.wav"
                 narration_receipt = asset_dir / f"narration-{index + 1:02d}.receipt.json"
-                reused = reuse_by_scene.get(scene_id)
+                reused = reuse_by_scene_kind.get(("narration", scene_id))
                 if reused is not None:
                     declaration, source_input = reused
                     narration_asset = {
@@ -705,6 +972,35 @@ def _ffprobe(path: Path) -> dict[str, Any]:
     }
 
 
+def _ffprobe_image(path: Path) -> dict[str, Any]:
+    data = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,width,height,pix_fmt",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    image = next(iter(data.get("streams", [])), {})
+    return {
+        "width": image.get("width"),
+        "height": image.get("height"),
+        "image_codec": image.get("codec_name"),
+        "pixel_format": image.get("pix_fmt"),
+    }
+
+
 def _create_cover_artifact(
     output_path: Path,
     *,
@@ -829,6 +1125,11 @@ def _media_artifact_metadata(media_path: Path, media_asset: dict[str, Any]) -> d
         except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
             # The final video remains the hard verification gate. Keep an
             # intermediate provider artifact available on an unusual codec.
+            pass
+    elif media_asset["kind"] == "image":
+        try:
+            metadata.update(_ffprobe_image(media_path))
+        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
             pass
     if isinstance(media_asset.get("metadata"), dict):
         metadata.update(media_asset["metadata"])

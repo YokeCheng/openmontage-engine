@@ -147,6 +147,41 @@ def test_real_tts_artifact_metadata_includes_ffprobe_audio_details(tmp_path: Pat
     assert 0.2 <= metadata["duration_seconds"] <= 0.4
 
 
+def test_generated_image_metadata_includes_resolution_and_codec(tmp_path: Path) -> None:
+    import subprocess
+
+    image = tmp_path / "generated.png"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x49A38C:s=800x450",
+            "-frames:v",
+            "1",
+            str(image),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    metadata = _media_artifact_metadata(
+        image,
+        {
+            "kind": "image",
+            "provider": "dashscope",
+            "tool": "image_selector",
+            "cost_usd": 0.02,
+        },
+    )
+
+    assert metadata["width"] == 800
+    assert metadata["height"] == 450
+    assert metadata["image_codec"] == "png"
+
+
 def test_quality_report_rejects_black_and_silent_narrated_delivery(tmp_path: Path) -> None:
     import subprocess
 
@@ -478,6 +513,114 @@ def test_shot_revision_reuses_unchanged_narration_and_calls_tts_once(
     assert fit_calls == [job_dir / "assets" / "narration-02.wav"]
 
 
+def test_shot_revision_reuses_unchanged_image_and_generates_only_changed_scene(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeImageSelector:
+        def __init__(self) -> None:
+            self.inputs: list[dict] = []
+
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            self.inputs.append(dict(inputs))
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"new-image")
+            return ToolResult(
+                success=True,
+                data={"output": str(output), "selected_provider": "dashscope"},
+                artifacts=[str(output)],
+                cost_usd=0.02,
+            )
+
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "dashscope",
+        "voice_provider": "none",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["scenes"] = [
+        {
+            "scene_id": "scene-01",
+            "title": "复用",
+            "duration_seconds": 2,
+            "narration": "复用",
+            "visual": {"type": "image", "prompt": "保持原图"},
+        },
+        {
+            "scene_id": "scene-02",
+            "title": "重做",
+            "duration_seconds": 3,
+            "narration": "重做",
+            "visual": {"type": "image", "prompt": "生成新图"},
+        },
+    ]
+    payload["reuse_assets"] = [
+        {
+            "asset_id": "reuse-image-01",
+            "platform_artifact_id": "artifact-image-v1",
+            "scene_id": "scene-01",
+            "source_scene_id": "scene-01",
+            "kind": "image",
+            "media_type": "image/png",
+        }
+    ]
+    job_dir = tmp_path / "job"
+    reused_path = job_dir / "inputs" / "reuse-image-01" / "scene-01.png"
+    reused_path.parent.mkdir(parents=True)
+    reused_path.write_bytes(b"reused-image")
+    job = {
+        "job_id": "job-image-redo",
+        "tenant_id": "tenant-a",
+        "inputs": [
+            {
+                "asset_id": "reuse-image-01",
+                "storage_name": "inputs/reuse-image-01/scene-01.png",
+                "media_type": "image/png",
+            }
+        ],
+    }
+    props = {"cuts": [{}, {}], "audio": {}}
+    fake = FakeImageSelector()
+
+    from tools.tool_registry import registry
+
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(registry, "get", lambda name: fake if name == "image_selector" else None)
+
+    assets = _materialize_media(
+        payload,
+        props,
+        job_dir / "assets",
+        EngineStore(tmp_path / "runtime"),
+        job,
+    )
+
+    assert [item["scene_id"] for item in fake.inputs] == ["scene-02"]
+    assert props["cuts"][0]["backgroundImage"] == "inputs/reuse-image-01/scene-01.png"
+    assert props["cuts"][1]["backgroundImage"] == "assets/scene-02.png"
+    assert assets[0]["metadata"] == {
+        "scene_id": "scene-01",
+        "prompt": "保持原图",
+        "selection_reason": "",
+        "ai_image_score": 0.0,
+        "reused": True,
+        "reused_from_artifact_id": "artifact-image-v1",
+        "provider_call": False,
+    }
+    assert assets[0]["cost_usd"] == 0
+    assert assets[1]["cost_usd"] == 0.02
+    assert EngineStore(tmp_path / "runtime").events("job-image-redo")[0]["type"] == "media.asset_reused"
+
+
 def test_shot_revision_rejects_cross_scene_narration_reuse(
     tmp_path: Path,
 ) -> None:
@@ -583,6 +726,224 @@ def test_approved_image_policy_executes_registry_selector_and_updates_explainer_
     assert store.events("job-media")[0]["type"] == "media.asset_ready"
 
 
+def test_hybrid_ai_images_only_generate_selected_scenes_in_parallel_and_keep_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeImageSelector:
+        def __init__(self) -> None:
+            self.inputs: list[dict] = []
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            with self.lock:
+                self.inputs.append(dict(inputs))
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            # Complete scene 03 first so the renderer must restore scene order.
+            time.sleep(0.08 if inputs["scene_id"] == "scene-02" else 0.01)
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(f"generated-{inputs['scene_id']}".encode())
+            with self.lock:
+                self.active -= 1
+            return ToolResult(
+                success=True,
+                data={
+                    "output": str(output),
+                    "selected_provider": "test-provider",
+                    "selected_tool": "test-image",
+                },
+                artifacts=[str(output)],
+                cost_usd=0.02,
+                duration_seconds=0.08,
+                model="image-v1",
+            )
+
+    from tools.tool_registry import registry
+
+    fake = FakeImageSelector()
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(registry, "get", lambda name: fake if name == "image_selector" else None)
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "test-provider",
+        "voice_provider": "none",
+        "music_provider": "none",
+    }
+    payload["scenes"] = [
+        {
+            "scene_id": f"scene-{index:02d}",
+            "title": title,
+            "duration_seconds": 1,
+            "narration": title,
+            "visual": {
+                "type": visual_type,
+                "prompt": prompt,
+                "selection_reason": reason,
+                "ai_image_score": score,
+            },
+        }
+        for index, (title, visual_type, prompt, reason, score) in enumerate(
+            [
+                ("标题", "motion_graphics", "标题动效", "文字镜头", 10),
+                ("隐喻", "image", "透明容器中的发光记忆卡片", "关键概念隐喻", 95),
+                ("取舍", "image", "新旧记忆卡片交替通过窗口", "关键过程隐喻", 90),
+                ("总结", "motion_graphics", "总结动效", "行动号召", 20),
+            ],
+            start=1,
+        )
+    ]
+    props = {
+        "cuts": [
+            {"id": f"scene-{index:02d}", "in_seconds": index - 1, "out_seconds": index}
+            for index in range(1, 5)
+        ]
+    }
+    store = EngineStore(tmp_path / "runtime")
+    job = {"job_id": "job-hybrid-images", "tenant_id": "tenant-a", "correlation_id": "corr"}
+
+    assets = _materialize_media(payload, props, tmp_path / "assets", store, job)
+
+    assert {item["scene_id"] for item in fake.inputs} == {"scene-02", "scene-03"}
+    assert all(item["allowed_providers"] == ["test-provider"] for item in fake.inputs)
+    assert fake.max_active == 2
+    assert "backgroundImage" not in props["cuts"][0]
+    assert props["cuts"][1]["backgroundImage"] == "assets/scene-02.png"
+    assert props["cuts"][2]["backgroundImage"] == "assets/scene-03.png"
+    assert "backgroundImage" not in props["cuts"][3]
+    assert [asset["metadata"]["scene_id"] for asset in assets] == ["scene-02", "scene-03"]
+    assert assets[0]["metadata"] == {
+        "scene_id": "scene-02",
+        "prompt": "透明容器中的发光记忆卡片",
+        "selection_reason": "关键概念隐喻",
+        "ai_image_score": 95.0,
+        "model": "image-v1",
+        "generation_duration_seconds": 0.08,
+        "provider_call": True,
+        "reused": False,
+    }
+    assert [event["data"]["scene_id"] for event in store.events("job-hybrid-images")] == [
+        "scene-02",
+        "scene-03",
+    ]
+
+
+def test_image_retry_reuses_successful_calls_without_losing_their_cost_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    class FakeImageSelector:
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, inputs: dict) -> ToolResult:
+            scene_id = str(inputs["scene_id"])
+            self.calls[scene_id] = self.calls.get(scene_id, 0) + 1
+            if scene_id == "scene-01" and self.calls[scene_id] == 1:
+                return ToolResult(
+                    success=False,
+                    error="temporary provider failure",
+                    error_code="rate_limit",
+                    retryable=True,
+                )
+            output = Path(inputs["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(f"generated-{scene_id}".encode())
+            return ToolResult(
+                success=True,
+                data={
+                    "output": str(output),
+                    "selected_provider": "dashscope",
+                    "selected_tool": "dashscope_image",
+                },
+                artifacts=[str(output)],
+                cost_usd=0.02,
+                duration_seconds=0.5,
+                model="qwen-image-2.0-pro",
+            )
+
+    from tools.tool_registry import registry
+
+    fake = FakeImageSelector()
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(registry, "get", lambda name: fake if name == "image_selector" else None)
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "dashscope",
+        "voice_provider": "none",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["scenes"] = [
+        {
+            "scene_id": f"scene-{index:02d}",
+            "title": f"Scene {index}",
+            "duration_seconds": 1,
+            "narration": f"Scene {index}",
+            "visual": {
+                "type": "image",
+                "prompt": f"Prompt {index}",
+                "selection_reason": f"Reason {index}",
+                "ai_image_score": 100 - index,
+            },
+        }
+        for index in range(1, 4)
+    ]
+    props = {
+        "cuts": [
+            {"id": f"scene-{index:02d}", "in_seconds": index - 1, "out_seconds": index}
+            for index in range(1, 4)
+        ]
+    }
+    store = EngineStore(tmp_path / "runtime")
+    job = {
+        "job_id": "job-image-retry-receipts",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "status": "rendering",
+        "stage": "media",
+        "progress": {"percent": 52, "message": "media", "updated_at": utc_now()},
+    }
+    store.save_job(job)
+
+    with pytest.raises(MediaActionRequired):
+        _materialize_media(payload, props, tmp_path / "assets", store, job)
+
+    job["actions"] = []
+    job["status"] = "rendering"
+    assets = _materialize_media(payload, props, tmp_path / "assets", store, job)
+
+    assert fake.calls == {"scene-01": 2, "scene-02": 1, "scene-03": 1}
+    assert [asset["metadata"]["scene_id"] for asset in assets] == [
+        "scene-01",
+        "scene-02",
+        "scene-03",
+    ]
+    assert sum(float(asset["cost_usd"]) for asset in assets) == pytest.approx(0.06)
+    recovered = assets[1:]
+    assert all(asset["provider"] == "dashscope" for asset in recovered)
+    assert all(asset["metadata"]["provider_call"] is True for asset in recovered)
+    assert all(asset["metadata"]["reused"] is False for asset in recovered)
+    assert all(asset["metadata"]["resumed_from_cached_generation"] is True for asset in recovered)
+
+
 def test_unavailable_approved_media_pauses_for_fallback_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Unavailable:
         value = "unavailable"
@@ -620,6 +981,77 @@ def test_unavailable_approved_media_pauses_for_fallback_action(tmp_path: Path, m
     assert paused is not None
     assert paused["status"] == "waiting_action"
     assert paused["actions"][0]["recommended_resolution"] == "use_motion_graphics"
+
+
+def test_failed_image_result_preserves_a_redacted_provider_reason_in_the_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Available:
+        value = "available"
+
+    secret = "dashscope-secret-must-not-persist"
+
+    class FakeImageSelector:
+        def get_status(self) -> Available:
+            return Available()
+
+        def execute(self, _inputs: dict) -> ToolResult:
+            return ToolResult(
+                success=False,
+                error=f"DashScope HTTP 429: api_key={secret}; quota exhausted",
+                error_code="rate_limit",
+                retryable=True,
+            )
+
+    from tools.tool_registry import registry
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", secret)
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(
+        registry,
+        "get",
+        lambda name: FakeImageSelector() if name == "image_selector" else None,
+    )
+    payload = manifest()
+    payload["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "dashscope",
+        "voice_provider": "none",
+        "music_provider": "none",
+        "fallback": "ask",
+    }
+    payload["scenes"][0]["visual"] = {
+        "type": "image",
+        "prompt": "A clear visual metaphor",
+    }
+    props = {"cuts": [{"id": "scene-01", "in_seconds": 0, "out_seconds": 1}]}
+    store = EngineStore(tmp_path / "runtime")
+    job = {
+        "job_id": "job-provider-reason",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "status": "rendering",
+        "stage": "media",
+        "progress": {"percent": 52, "message": "media", "updated_at": utc_now()},
+    }
+    store.save_job(job)
+
+    with pytest.raises(MediaActionRequired):
+        _materialize_media(payload, props, tmp_path / "assets", store, job)
+
+    paused = store.load_job("job-provider-reason")
+    assert paused is not None
+    context = paused["actions"][0]["context"]
+    assert context == {
+        "scene_id": "scene-01",
+        "capability": "ai_image",
+        "provider": "dashscope",
+        "provider_error": "DashScope HTTP 429: api_key=[redacted]; quota exhausted",
+        "error_code": "rate_limit",
+        "retryable": True,
+    }
+    assert secret not in json.dumps(paused)
 
 
 def request_body(
@@ -1290,6 +1722,77 @@ def test_action_resolution_cancel_event_sequence_and_restart_recovery(
     recovered = restarted.get(f"/v1/jobs/{job['job_id']}", headers={"X-Tenant-ID": "tenant-a"})
     assert recovered.status_code == 200
     assert recovered.json()["status"] == "cancelled"
+
+
+def test_ai_image_fallback_only_changes_the_failed_scene(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = create(client)
+    stored = client.app.state.store.load_job(job["job_id"])
+    assert stored is not None
+    stored["input"]["media_policy"] = {
+        "visual_source": "ai_image",
+        "image_provider": "dashscope",
+        "fallback": "ask",
+    }
+    stored["input"]["scenes"] = [
+        {
+            "scene_id": "scene-01",
+            "title": "开场",
+            "duration_seconds": 1,
+            "narration": "开场",
+            "visual": {"type": "motion_graphics", "prompt": "标题动效"},
+        },
+        {
+            "scene_id": "scene-02",
+            "title": "失败镜头",
+            "duration_seconds": 1,
+            "narration": "失败镜头",
+            "visual": {"type": "image", "prompt": "失败图片"},
+        },
+        {
+            "scene_id": "scene-03",
+            "title": "保留镜头",
+            "duration_seconds": 1,
+            "narration": "保留镜头",
+            "visual": {"type": "image", "prompt": "保留图片"},
+        },
+    ]
+    action_id = new_id("action")
+    stored["status"] = "waiting_action"
+    stored["actions"] = [
+        {
+            "action_id": action_id,
+            "job_id": job["job_id"],
+            "type": "provider_fallback",
+            "status": "pending",
+            "summary": "Image provider failed",
+            "options": [
+                {"value": "use_motion_graphics", "label": "Use motion graphics"},
+                {"value": "retry", "label": "Retry"},
+            ],
+            "context": {"scene_id": "scene-02", "capability": "ai_image"},
+            "created_at": utc_now(),
+        }
+    ]
+    client.app.state.store.save_job(stored)
+    submitted: list[str] = []
+    monkeypatch.setattr(client.app.state.scheduler, "submit", submitted.append)
+
+    response = client.post(
+        f"/v1/jobs/{job['job_id']}/actions/{action_id}/resolve",
+        headers={"X-Tenant-ID": "tenant-a"},
+        json={"resolution": "use_motion_graphics", "resolved_by": "user-1"},
+    )
+
+    assert response.status_code == 200
+    updated = client.app.state.store.load_job(job["job_id"])
+    assert updated is not None
+    assert updated["input"]["media_policy"]["visual_source"] == "ai_image"
+    assert updated["input"]["scenes"][1]["visual"]["type"] == "motion_graphics"
+    assert updated["input"]["scenes"][2]["visual"]["type"] == "image"
+    assert submitted == [job["job_id"]]
 
 
 def create_workspace(

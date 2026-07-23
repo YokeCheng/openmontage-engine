@@ -55,7 +55,7 @@ FFmpeg / Remotion / HyperFrames / 媒体服务 / 对象存储
 .venv/bin/python -m uvicorn engine_api.app:app --host 127.0.0.1 --port 8100
 ```
 
-API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/jobs` 接收平台已批准的清单并异步执行真实媒体工具，`/v1/workspaces` 继续提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。任务媒体只通过当前 Job 的 Remotion `public-dir` 提供，绝不把宿主绝对路径交给浏览器渲染器。`animated-explainer` 按已批准分镜并发调用最多三路真实 TTS，并把每段音频放入对应时间线；安全收据让失败重试复用已完成音频，避免重复调用和重复计费。每段均先用 FFprobe 校验时长，轻度超长时 FFmpeg `atempo` 会在安全范围内保留全部文案并适配镜头，原始时长、适配时长、倍率和时间区间进入产物元数据，严重超长则明确失败而不是静默截断。引擎直接调用仓库内固定版本的 Remotion CLI，不依赖交互式 `npx` 下载；默认使用受控并发、ANGLE 和 `veryfast` 编码，也可通过 `OPENMONTAGE_REMOTION_CONCURRENCY`、`OPENMONTAGE_REMOTION_GL` 与 `OPENMONTAGE_REMOTION_X264_PRESET` 调整。取消会终止完整渲染进程组，终态写入采用原子单调保护，旧渲染线程不能把已取消任务恢复为成功。成功任务除 MP4、SRT 和报告外还会提取确定性 JPEG 封面。最终质检覆盖时长、分辨率、编码、音频流、黑帧、静音、字幕安全区和产物完整性。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
+API 使用 `/v1` 前缀。`GET /v1/pipelines` 从 `pipeline_defs/` 动态读取全部 Pipeline；`/v1/jobs` 接收平台已批准的清单并异步执行真实媒体工具，`/v1/workspaces` 继续提供阶段上下文、工具执行、Checkpoint、事件、取消和产物。任务媒体只通过当前 Job 的 Remotion `public-dir` 提供，绝不把宿主绝对路径交给浏览器渲染器。`animated-explainer` 只为逐镜头 `visual.type=image` 的关键镜头调用 `image_selector`，最多三路并行，并按批准顺序登记结果和事件；明确指定的图片供应商是硬约束，失败不会静默改用其他供应商。成功图片保存安全费用收据，失败重试复用已完成调用且保留首次费用；逐镜头失败动作允许重试、改用动效或取消。该 Pipeline 也按已批准分镜并发调用最多三路真实 TTS，并把每段音频放入对应时间线；安全收据让失败重试复用已完成音频，避免重复调用和重复计费。每段均先用 FFprobe 校验时长，轻度超长时 FFmpeg `atempo` 会在安全范围内保留全部文案并适配镜头，原始时长、适配时长、倍率和时间区间进入产物元数据，严重超长则明确失败而不是静默截断。引擎直接调用仓库内固定版本的 Remotion CLI，不依赖交互式 `npx` 下载；默认使用受控并发、ANGLE 和 `veryfast` 编码，也可通过 `OPENMONTAGE_REMOTION_CONCURRENCY`、`OPENMONTAGE_REMOTION_GL` 与 `OPENMONTAGE_REMOTION_X264_PRESET` 调整。取消会终止完整渲染进程组，终态写入采用原子单调保护，旧渲染线程不能把已取消任务恢复为成功。成功任务除 MP4、SRT 和报告外还会提取确定性 JPEG 封面。最终质检覆盖时长、分辨率、编码、音频流、黑帧、静音、字幕安全区和产物完整性。完整协议见 [docs/ENGINE_API_V1.md](docs/ENGINE_API_V1.md)。
 
 OpenMontage 是传输和产物契约的事实源。FastAPI 生成的规范 OpenAPI 提交在 `schemas/api/engine_api.openapi.json`，版本、操作集合和全部 Schema 摘要提交在 `schemas/api/engine_api.contract.json`。修改公共路由、请求模型或产物 Schema 后必须重新导出并运行 stale check：
 
@@ -83,6 +83,8 @@ GET  /v1/jobs/{job_id}/artifacts/{artifact_id}/content
 ```
 
 `animated-explainer v1.3` 的镜头重做仍通过新 Job 执行。CouncilForge 在已批准清单中声明并上传未变镜头的复用媒体；OpenMontage 校验租户 Job 路径、场景、媒体类型、大小和 SHA-256 后才接受输入。复用旁白会产生 `media.asset_reused` 事件，并在产物 metadata 标记 `reused=true`、来源产物和 `provider_call=false`；它不再次调用 TTS，也不对已经按时间线适配的音频重复转码。变化镜头正常生成，最终 MP4 仍重新合成并登记独立校验值。版本谱系、当前版本和历史恢复由 CouncilForge PostgreSQL 管理，引擎不建立第二套业务版本数据库。
+
+`animated-explainer v1.4` 把同一复用协议扩展到图片。CouncilForge 只上传未变场景的已归档图片，OpenMontage 校验后登记 `media.asset_reused`、零费用和 `provider_call=false`；变化图片才调用供应商。图片产物登记场景、prompt、选择原因、供应商、模型、费用、耗时、SHA-256、尺寸、编码和像素格式。失败重试的本地生成收据仅包含允许的来源与计费字段，不保存凭证、完整 ToolResult 或签名 URL。
 
 历史阶段式任务和后续高级 Pipeline 仍可使用能力 Workspace：
 

@@ -228,6 +228,20 @@ CouncilForge 延迟上传的媒体。引擎必须同时验证租户 Job 路径�
 正常生成，完整 MP4 重新合成。版本谱系、当前版本指针、历史播放和无渲染恢复
 属于 CouncilForge 的 PostgreSQL 业务状态，不由 OpenMontage 维护。
 
+图片复用使用相同的租户、Job、场景、类型、大小和 SHA-256 校验。复用成功的
+图片登记 `kind=image`、`reused=true`、`provider_call=false`、来源产物和零费用；
+变化图片才进入 `image_selector`。`animated-explainer` 只生成逐镜头
+`visual.type=image` 的图片，其他镜头继续使用 Remotion 动效；图片生成最多三路
+并发，但事件与产物按清单中的场景顺序登记。平台明确批准供应商时，引擎把它
+作为唯一 `allowed_providers`，不得在失败后静默换供应商。
+
+每个成功图片调用写入只包含工具、供应商、模型、费用和耗时的本地安全收据，
+用于同一 Job 失败重试时识别已扣费结果。收据不得包含凭证、签名 URL 或完整
+ToolResult。重试复用成功图片时仍登记首次真实费用和 `provider_call=true`，
+但不再次请求供应商；跨版本由 CouncilForge 提供的 MinIO 图片则登记零费用和
+`provider_call=false`。失败动作必须包含具体 `scene_id`、脱敏原因以及
+`retry`、`use_motion_graphics`、`cancel` 选择。
+
 ### 4.2 状态机
 
 ```text
