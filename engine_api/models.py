@@ -13,6 +13,33 @@ class SceneVisual(BaseModel):
     prompt: str = ""
 
 
+class VideoShotRequest(BaseModel):
+    """One immutable, budget-bounded AI video generation operation."""
+
+    model_config = ConfigDict(extra="forbid")
+    scene_id: str = Field(min_length=1, max_length=128)
+    operation: Literal["text_to_video", "image_to_video"]
+    prompt: str = Field(min_length=1, max_length=8000)
+    negative_prompt: str = Field(default="", max_length=4000)
+    reference_asset_ids: list[str] = Field(default_factory=list, max_length=16)
+    reference_image_path: str | None = Field(default=None, max_length=4096)
+    duration_seconds: int = Field(ge=1, le=15)
+    aspect_ratio: Literal["16:9", "9:16", "1:1"]
+    provider: str = Field(default="auto", min_length=1, max_length=64)
+    model: str | None = Field(default=None, max_length=128)
+    output_path: str | None = Field(default=None, max_length=4096)
+    idempotency_key: str = Field(min_length=1, max_length=240)
+    maximum_cost_usd: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "VideoShotRequest":
+        if self.operation == "image_to_video" and not (
+            self.reference_asset_ids or self.reference_image_path
+        ):
+            raise ValueError("image_to_video requires a reference image")
+        return self
+
+
 class VideoScene(BaseModel):
     model_config = ConfigDict(extra="allow")
     scene_id: str

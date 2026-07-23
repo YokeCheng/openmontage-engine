@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from engine_api import models as engine_models
 from engine_api.app import create_app
 from engine_api.renderer import (
     MediaActionRequired,
@@ -23,6 +24,25 @@ from engine_api.renderer import (
 )
 from engine_api.store import EngineStore, new_id, utc_now
 from tools.base_tool import RetryPolicy, ToolResult
+
+
+def test_video_shot_request_requires_stable_execution_contract() -> None:
+    assert hasattr(engine_models, "VideoShotRequest")
+    request = engine_models.VideoShotRequest(
+        scene_id="scene-01",
+        operation="text_to_video",
+        prompt="Kinetic typography reveals a single product benefit",
+        duration_seconds=5,
+        aspect_ratio="1:1",
+        provider="kling",
+        idempotency_key="job-1:final:scene-01",
+        maximum_cost_usd=0.8,
+    )
+
+    assert request.provider == "kling"
+    assert request.aspect_ratio == "1:1"
+    assert request.idempotency_key == "job-1:final:scene-01"
+    assert request.maximum_cost_usd == 0.8
 
 
 def manifest(title: str = "CouncilForge") -> dict:

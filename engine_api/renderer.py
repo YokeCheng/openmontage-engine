@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .store import EngineStore, new_id, utc_now
+from tools.base_tool import ToolResult
 from tools.subtitle.subtitle_gen import SubtitleGen
 
 
@@ -416,7 +417,20 @@ def _materialize_media(
                     }
                 )
                 continue
-            if output_path.is_file() and output_path.stat().st_size > 0:
+            video_idempotency_key = str(
+                visual.get("idempotency_key")
+                or f'{job.get("request_id") or job["job_id"]}:video:{scene_id}'
+            )
+            video_receipt = None
+            if source_mode == "ai_video":
+                from .media_receipts import load_receipt
+
+                video_receipt = load_receipt(asset_dir / ".receipts", video_idempotency_key)
+            if (
+                output_path.is_file()
+                and output_path.stat().st_size > 0
+                and (source_mode == "ai_image" or video_receipt is None)
+            ):
                 prepared.append(
                     {
                         "scene_id": scene_id,
@@ -438,11 +452,34 @@ def _materialize_media(
             if source_mode == "ai_image" and preferred != "auto":
                 inputs["allowed_providers"] = [preferred]
             if source_mode == "ai_video":
+                from .models import VideoShotRequest
+
+                maximum_cost = float(
+                    visual.get("maximum_cost_usd")
+                    or policy.get("video_maximum_cost_usd")
+                    or (manifest.get("budget") or {}).get("maximum_usd")
+                    or 0
+                )
                 inputs.update(
                     {
-                        "operation": "text_to_video",
+                        "operation": str(visual.get("operation") or "text_to_video"),
                         "duration": str(max(1, min(10, round(float(scene.get("duration_seconds") or 5))))),
                     }
+                )
+                prepared_request = VideoShotRequest(
+                    scene_id=scene_id,
+                    operation=inputs["operation"],
+                    prompt=inputs["prompt"],
+                    negative_prompt=str(visual.get("negative_prompt") or ""),
+                    reference_asset_ids=list(visual.get("reference_asset_ids") or []),
+                    reference_image_path=visual.get("reference_image_path"),
+                    duration_seconds=int(inputs["duration"]),
+                    aspect_ratio=aspect_ratio,
+                    provider=preferred,
+                    model=visual.get("model"),
+                    output_path=str(output_path),
+                    idempotency_key=video_idempotency_key,
+                    maximum_cost_usd=maximum_cost,
                 )
             prepared.append(
                 {
@@ -451,6 +488,7 @@ def _materialize_media(
                     "cut": cut,
                     "path": output_path,
                     "inputs": inputs,
+                    "video_request": prepared_request if source_mode == "ai_video" else None,
                     "cached": False,
                 }
             )
@@ -477,9 +515,31 @@ def _materialize_media(
                         logger.exception("Image provider failed for %s", item["scene_id"])
                         generated_results[item["scene_id"]] = None
         elif pending:
+            from .media_receipts import (
+                MediaChargeReconciliationRequired,
+                MediaProviderFailed,
+                execute_video_shot,
+            )
+
             for item in pending:
                 try:
-                    generated_results[item["scene_id"]] = selector.execute(item["inputs"])
+                    generated_results[item["scene_id"]] = execute_video_shot(
+                        item["video_request"],
+                        asset_dir / ".receipts",
+                        selector,
+                    )
+                except (MediaChargeReconciliationRequired, MediaProviderFailed) as exc:
+                    generated_results[item["scene_id"]] = ToolResult(
+                        success=False,
+                        error=str(exc),
+                        error_code=(
+                            "PROVIDER_CHARGE_RECONCILIATION_REQUIRED"
+                            if isinstance(exc, MediaChargeReconciliationRequired)
+                            else "MEDIA_PROVIDER_FAILED"
+                        ),
+                        retryable=isinstance(exc, MediaProviderFailed),
+                    )
+                    logger.warning("Video provider requires action for %s: %s", item["scene_id"], exc)
                 except Exception:
                     logger.exception("Video provider failed for %s", item["scene_id"])
                     generated_results[item["scene_id"]] = None
@@ -595,8 +655,17 @@ def _materialize_media(
                     "ai_image_score": float(visual.get("ai_image_score") or 0),
                     "model": str(result.model or result.data.get("model") or ""),
                     "generation_duration_seconds": float(result.duration_seconds or 0),
-                    "provider_call": True,
-                    "reused": False,
+                    "provider_call": bool(result.data.get("provider_call", True)),
+                    "reused": not bool(result.data.get("provider_call", True)),
+                    **(
+                        {
+                            "external_task_id": result.data.get("external_task_id"),
+                            "sha256": result.data.get("sha256"),
+                            "media": result.data.get("media") or {},
+                        }
+                        if source_mode == "ai_video"
+                        else {}
+                    ),
                 },
             )
             media_assets.append(asset)
