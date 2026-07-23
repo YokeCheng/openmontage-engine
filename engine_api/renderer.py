@@ -294,7 +294,7 @@ def _materialize_media(
         if not isinstance(declaration, dict):
             continue
         kind = str(declaration.get("kind") or "")
-        if kind not in {"narration", "image"}:
+        if kind not in {"narration", "image", "video"}:
             continue
         scene_id = str(declaration.get("scene_id") or "")
         source_scene_id = str(declaration.get("source_scene_id") or scene_id)
@@ -307,6 +307,8 @@ def _materialize_media(
         if scene_id and source_input is not None:
             media_type = str(source_input.get("media_type") or "")
             if kind == "image" and media_type and not media_type.startswith("image/"):
+                raise ValueError("REUSE_ASSET_MEDIA_TYPE_MISMATCH")
+            if kind == "video" and media_type and not media_type.startswith("video/"):
                 raise ValueError("REUSE_ASSET_MEDIA_TYPE_MISMATCH")
             if kind == "narration" and media_type and not media_type.startswith("audio/"):
                 raise ValueError("REUSE_ASSET_MEDIA_TYPE_MISMATCH")
@@ -417,9 +419,10 @@ def _materialize_media(
             suffix = ".png" if source_mode == "ai_image" else ".mp4"
             output_path = asset_dir / f"{scene_id}{suffix}"
             visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
-            image_reuse = reuse_by_scene_kind.get(("image", scene_id))
-            if source_mode == "ai_image" and image_reuse is not None:
-                declaration, source_input = image_reuse
+            reuse_kind = "image" if source_mode == "ai_image" else "video"
+            visual_reuse = reuse_by_scene_kind.get((reuse_kind, scene_id))
+            if visual_reuse is not None:
+                declaration, source_input = visual_reuse
                 prepared.append(
                     {
                         "scene_id": scene_id,
@@ -577,12 +580,18 @@ def _materialize_media(
             cut = item["cut"]
             if item.get("reuse") is not None:
                 declaration, _source_input = item["reuse"]
-                cut["backgroundImage"] = _public_asset_src(item["path"], public_dir)
+                reuse_kind = str(declaration.get("kind") or "image")
+                field = (
+                    "backgroundVideo"
+                    if reuse_kind == "video"
+                    else "backgroundImage"
+                )
+                cut[field] = _public_asset_src(item["path"], public_dir)
                 cut["backgroundOverlay"] = 0.45
                 media_assets.append(
                     {
                         "path": item["path"],
-                        "kind": "image",
+                        "kind": reuse_kind,
                         "tool": "artifact_reuse",
                         "provider": "councilforge-minio",
                         "cost_usd": 0.0,

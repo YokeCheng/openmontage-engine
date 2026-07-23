@@ -177,3 +177,79 @@ def test_ambiguous_video_charge_pauses_release_without_retry(
         )
 
     assert selector.calls == 1
+
+
+def test_quality_revision_reuses_unaffected_video_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.tool_registry import registry
+
+    selector = _FakeVideoSelector()
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    monkeypatch.setattr(
+        registry,
+        "get",
+        lambda name: selector if name == "video_selector" else None,
+    )
+    job_dir = tmp_path / "job"
+    reused = job_dir / "inputs" / "reuse-video-scene-01" / "scene-01.mp4"
+    reused.parent.mkdir(parents=True)
+    reused.write_bytes(b"verified-prior-video")
+    manifest = {
+        "title": "Partial quality revision",
+        "media_policy": {
+            "visual_source": "ai_video",
+            "video_provider": "kling",
+            "voice_provider": "none",
+            "music_provider": "none",
+        },
+        "budget": {"maximum_usd": 1.0},
+        "render": {"aspect_ratio": "16:9"},
+        "reuse_assets": [
+            {
+                "kind": "video",
+                "scene_id": "scene-01",
+                "source_scene_id": "scene-01",
+                "asset_id": "reuse-video-scene-01",
+                "platform_artifact_id": "artifact-video-scene-01",
+            }
+        ],
+        "scenes": [
+            {
+                "scene_id": "scene-01",
+                "title": "Unchanged shot",
+                "duration_seconds": 5,
+                "visual": {"type": "video", "prompt": "Keep prior shot"},
+            }
+        ],
+    }
+    props = {"cuts": [{"id": "scene-01"}]}
+    job = {
+        "job_id": "job-quality-reuse",
+        "request_id": "request-quality-reuse",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+        "inputs": [
+            {
+                "asset_id": "reuse-video-scene-01",
+                "storage_name": "inputs/reuse-video-scene-01/scene-01.mp4",
+                "media_type": "video/mp4",
+            }
+        ],
+    }
+
+    assets = _materialize_media(
+        manifest,
+        props,
+        job_dir / "assets",
+        EngineStore(tmp_path / "runtime"),
+        job,
+    )
+
+    assert selector.calls == 0
+    assert props["cuts"][0]["backgroundVideo"] == (
+        "inputs/reuse-video-scene-01/scene-01.mp4"
+    )
+    assert assets[0]["kind"] == "video"
+    assert assets[0]["metadata"]["reused"] is True
