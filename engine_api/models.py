@@ -62,8 +62,8 @@ class MusicRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "MusicRequest":
-        if self.source in {"uploaded", "library"} and not self.asset_id:
-            raise ValueError(f"{self.source} music requires asset_id")
+        if self.source == "uploaded" and not self.asset_id:
+            raise ValueError("uploaded music requires asset_id")
         return self
 
 

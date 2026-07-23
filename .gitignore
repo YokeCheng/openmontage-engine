@@ -103,3 +103,4 @@ venv/
 
 # CouncilForge engine runtime (job snapshots, events, and rendered artifacts)
 .engine-runtime/
+.engine-runtime-v2/

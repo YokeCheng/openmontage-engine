@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import wave
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,62 @@ def _manifest() -> dict:
 def test_music_request_rejects_missing_uploaded_asset() -> None:
     with pytest.raises(ValidationError, match="asset_id"):
         MusicRequest(source="uploaded", duration_seconds=6, maximum_cost_usd=0)
+
+
+def test_local_library_music_without_asset_selects_first_track(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.tool_registry import registry
+
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "0-broken.mp3").write_bytes(b"not an audio stream")
+    with wave.open(str(library / "a-theme.wav"), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8_000)
+        stream.writeframes(b"\x00\x00" * 8_000)
+    with wave.open(str(library / "b-theme.wav"), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8_000)
+        stream.writeframes(b"\x00\x00" * 8_000)
+    monkeypatch.setenv("MUSIC_LIBRARY_DIR", str(library))
+    monkeypatch.setattr(registry, "ensure_discovered", lambda: None)
+    manifest = _manifest()
+    manifest["media_policy"]["music_provider"] = "local"
+    manifest["audio"]["music"] = {
+        "source": "library",
+        "asset_id": None,
+        "duration_seconds": 6,
+        "provider": "local",
+        "maximum_cost_usd": 0,
+        "fallback": "continue_without_music",
+    }
+    props = {"cuts": [{"id": "scene-01"}]}
+    store = EngineStore(tmp_path / "runtime")
+    job_dir = tmp_path / "job"
+    job = {
+        "job_id": "job-library",
+        "tenant_id": "tenant-a",
+        "correlation_id": "corr",
+    }
+
+    assets = _materialize_media(
+        manifest,
+        props,
+        job_dir / "assets",
+        store,
+        job,
+    )
+
+    background = next(
+        item for item in assets if item["role"] == "background_music"
+    )
+    assert background["path"].name == "a-theme.wav"
+    assert background["metadata"]["license"]["source"] == "platform_library"
+    assert props["audio"]["music"]["src"] == "assets/music-library/a-theme.wav"
 
 
 def test_uploaded_music_is_bound_with_license_and_mix_contract(

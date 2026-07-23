@@ -65,7 +65,7 @@ def _remotion_command(
         1,
         int(os.getenv("OPENMONTAGE_REMOTION_CONCURRENCY", str(min(8, os.cpu_count() or 1)))),
     )
-    return [
+    command = [
         str(cli),
         "render",
         "src/index.tsx",
@@ -78,6 +78,16 @@ def _remotion_command(
         f"--gl={os.getenv('OPENMONTAGE_REMOTION_GL', 'angle')}",
         f"--x264-preset={os.getenv('OPENMONTAGE_REMOTION_X264_PRESET', 'veryfast')}",
     ]
+    browser_executable = os.getenv(
+        "OPENMONTAGE_REMOTION_BROWSER_EXECUTABLE",
+        "",
+    ).strip()
+    if browser_executable:
+        browser_path = Path(browser_executable).expanduser()
+        if not browser_path.is_file():
+            raise FileNotFoundError("REMOTION_BROWSER_EXECUTABLE_MISSING")
+        command.append(f"--browser-executable={browser_path}")
+    return command
 
 
 def _terminate_process_group(process: subprocess.Popen[Any], *, grace_seconds: float = 5) -> None:
@@ -967,6 +977,48 @@ def _materialize_media(
         music_request = MusicRequest.model_validate(music_payload)
         music_asset_id = str(music_request.asset_id or "")
         approved_music = approved_inputs.get(music_asset_id) if music_asset_id else None
+        if music_request.source == "library" and approved_music is None and not music_asset_id:
+            from tools.audio.music_library import MusicLibrary
+
+            library_result = MusicLibrary().execute({})
+            tracks = (
+                library_result.data.get("tracks", [])
+                if library_result.success and isinstance(library_result.data, dict)
+                else []
+            )
+            if shutil.which("ffprobe") is not None:
+                tracks = [
+                    item
+                    for item in tracks
+                    if item.get("duration_seconds") is not None
+                ]
+            if tracks:
+                selected_track = tracks[0]
+                selected_path = Path(str(selected_track["path"])).resolve()
+                library_target_dir = asset_dir / "music-library"
+                library_target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = library_target_dir / selected_path.name
+                shutil.copy2(selected_path, target_path)
+                approved_music = {
+                    "path": target_path.resolve(),
+                    "media_type": mimetypes.guess_type(target_path.name)[0] or "audio/mpeg",
+                    "metadata": {"license_name": str(selected_track.get("name") or selected_path.name)},
+                }
+                store.append_event(
+                    job,
+                    "media.music_library_selected",
+                    {"name": selected_path.name},
+                )
+            elif music_request.fallback == "continue_without_music":
+                store.append_event(
+                    job,
+                    "media.music_library_skipped",
+                    {"reason": "no_playable_tracks"},
+                )
+                return media_assets
+            else:
+                fallback("soundtrack", "music_library", provider="local")
+                return media_assets
         music_volume = 0.12
         ducking_volume = music_volume * math.pow(10, music_request.ducking_db / 20)
         music_props = {

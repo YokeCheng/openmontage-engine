@@ -114,6 +114,12 @@ def test_engine_render_uses_pinned_non_interactive_remotion_cli(
     cli.parent.mkdir(parents=True)
     cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
     monkeypatch.setenv("OPENMONTAGE_REMOTION_CONCURRENCY", "8")
+    browser = tmp_path / "Google Chrome"
+    browser.write_text("", encoding="utf-8")
+    monkeypatch.setenv(
+        "OPENMONTAGE_REMOTION_BROWSER_EXECUTABLE",
+        str(browser),
+    )
 
     command = _remotion_command(
         repo_root,
@@ -130,6 +136,7 @@ def test_engine_render_uses_pinned_non_interactive_remotion_cli(
     assert "--concurrency=8" in command
     assert "--gl=angle" in command
     assert "--x264-preset=veryfast" in command
+    assert f"--browser-executable={browser}" in command
 
 
 def test_real_tts_artifact_metadata_includes_ffprobe_audio_details(tmp_path: Path) -> None:
