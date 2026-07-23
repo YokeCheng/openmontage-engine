@@ -60,6 +60,48 @@ def test_segmented_music_amix_disables_normalize(tmp_path, monkeypatch):
     assert "normalize=0" in fc, f"amix must disable normalize; got: {fc}"
 
 
+def test_full_mix_uses_requested_loudness_and_ducking(tmp_path, monkeypatch):
+    """The final audio mix must preserve the approved LUFS/ducking contract."""
+    narration = tmp_path / "narration.wav"
+    music = tmp_path / "music.wav"
+    narration.write_bytes(b"stub")
+    music.write_bytes(b"stub")
+    captured = []
+
+    def fake_run(self, cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class _R:
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(AudioMixer, "run_command", fake_run)
+    result = AudioMixer().execute(
+        {
+            "operation": "full_mix",
+            "tracks": [
+                {"path": str(narration), "role": "speech"},
+                {"path": str(music), "role": "music"},
+            ],
+            "ducking": {
+                "enabled": True,
+                "music_volume_during_speech": 0.2,
+            },
+            "normalize": True,
+            "loudnorm_target": -14,
+            "output_path": str(tmp_path / "mixed.wav"),
+        }
+    )
+
+    assert result.success
+    ffmpeg_cmd = next(command for command in captured if command[0] == "ffmpeg")
+    graph = ffmpeg_cmd[ffmpeg_cmd.index("-filter_complex") + 1]
+    assert "sidechaincompress" in graph
+    assert "loudnorm=I=-14.0" in graph
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
 def test_segmented_music_preserves_narration_level(tmp_path):
     """End-to-end: narration in a no-music region is not ~6 dB quieter."""

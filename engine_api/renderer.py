@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -17,6 +18,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .models import MusicRequest
 from .store import EngineStore, new_id, utc_now
 from tools.base_tool import ToolResult
 from tools.subtitle.subtitle_gen import SubtitleGen
@@ -264,7 +266,18 @@ def _materialize_media(
     policy = manifest.get("media_policy") if isinstance(manifest.get("media_policy"), dict) else {}
     source_mode = str(policy.get("visual_source") or "motion_graphics")
     voice_provider = str(policy.get("voice_provider") or "none")
+    audio_config = manifest.get("audio") if isinstance(manifest.get("audio"), dict) else {}
+    raw_music = audio_config.get("music")
+    raw_music_source = (
+        str(raw_music.get("source") or "none")
+        if isinstance(raw_music, dict)
+        else str(raw_music or "none")
+    )
     music_provider = str(policy.get("music_provider") or "none")
+    if raw_music_source not in {"", "none"} and music_provider == "none":
+        music_provider = str(
+            raw_music.get("provider") if isinstance(raw_music, dict) else raw_music_source
+        )
     asset_dir.mkdir(parents=True, exist_ok=True)
     media_assets: list[dict[str, Any]] = []
     public_dir = asset_dir.parent
@@ -922,39 +935,97 @@ def _materialize_media(
                 }
 
     if music_provider != "none":
-        music_asset_id = str((manifest.get("audio") or {}).get("music_asset_id") or "")
+        music_payload = dict(raw_music) if isinstance(raw_music, dict) else {}
+        legacy_source = raw_music_source if raw_music_source in {
+            "uploaded",
+            "library",
+            "generated",
+            "none",
+        } else "generated"
+        music_payload.setdefault("source", legacy_source)
+        music_payload.setdefault("asset_id", audio_config.get("music_asset_id"))
+        music_payload.setdefault(
+            "duration_seconds",
+            float((manifest.get("render") or {}).get("duration_seconds") or 30),
+        )
+        music_payload.setdefault("provider", music_provider)
+        music_payload.setdefault(
+            "maximum_cost_usd",
+            float((manifest.get("budget") or {}).get("maximum_music_usd") or 0),
+        )
+        music_payload.setdefault("fallback", str(policy.get("fallback") or "ask"))
+        music_request = MusicRequest.model_validate(music_payload)
+        music_asset_id = str(music_request.asset_id or "")
         approved_music = approved_inputs.get(music_asset_id) if music_asset_id else None
+        music_volume = 0.12
+        ducking_volume = music_volume * math.pow(10, music_request.ducking_db / 20)
+        music_props = {
+            "volume": music_volume,
+            "duckingVolume": round(ducking_volume, 6),
+            "fadeInSeconds": music_request.fade_in_seconds,
+            "fadeOutSeconds": music_request.fade_out_seconds,
+            "loop": True,
+        }
+        props.setdefault("audio", {})["targetLufs"] = music_request.target_lufs
+        if music_request.source in {"uploaded", "library"} and approved_music is None:
+            raise ValueError(f"SOURCE_INPUT_NOT_UPLOADED:{music_asset_id}")
         if approved_music is not None:
             media_type = str(approved_music.get("media_type") or "")
             if not media_type.startswith("audio/"):
                 raise ValueError(f"SOURCE_INPUT_MUSIC_TYPE_UNSUPPORTED:{music_asset_id}")
             props.setdefault("audio", {})["music"] = {
                 "src": _public_asset_src(approved_music["path"], public_dir),
-                "volume": 0.12,
-                "duckingVolume": 0.045,
-                "fadeInSeconds": 1.5,
-                "fadeOutSeconds": 2.5,
-                "loop": True,
+                **music_props,
             }
+            input_metadata = (
+                approved_music.get("metadata")
+                if isinstance(approved_music.get("metadata"), dict)
+                else {}
+            )
+            license_source = (
+                "user_upload"
+                if music_request.source == "uploaded"
+                else "platform_library"
+            )
+            media_assets.append(
+                {
+                    "path": approved_music["path"],
+                    "kind": "audio",
+                    "role": "background_music",
+                    "tool": "approved_input",
+                    "provider": music_request.source,
+                    "cost_usd": 0.0,
+                    "metadata": {
+                        "license": {
+                            "source": license_source,
+                            "name": str(input_metadata.get("license_name") or ""),
+                        },
+                        "target_lufs": music_request.target_lufs,
+                        "ducking_db": music_request.ducking_db,
+                    },
+                }
+            )
             store.append_event(job, "media.music_input_bound", {"asset_id": music_asset_id})
             return media_assets
         music_path = asset_dir / "music.mp3"
         if music_path.is_file() and music_path.stat().st_size > 0:
             props.setdefault("audio", {})["music"] = {
                 "src": _public_asset_src(music_path, public_dir),
-                "volume": 0.12,
-                "duckingVolume": 0.045,
-                "fadeInSeconds": 1.5,
-                "fadeOutSeconds": 2.5,
-                "loop": True,
+                **music_props,
             }
             media_assets.append(
                 {
                     "path": music_path.resolve(),
                     "kind": "audio",
+                    "role": "background_music",
                     "tool": "cached",
                     "provider": music_provider,
                     "cost_usd": 0.0,
+                    "metadata": {
+                        "license": {"source": "provider_generated"},
+                        "target_lufs": music_request.target_lufs,
+                        "ducking_db": music_request.ducking_db,
+                    },
                 }
             )
             return media_assets
@@ -969,8 +1040,13 @@ def _materialize_media(
             result = tool.execute(
                 {
                     "prompt": str((manifest.get("creative") or {}).get("direction") or manifest.get("objective") or ""),
-                    "duration_seconds": float((manifest.get("render") or {}).get("duration_seconds") or 30),
-                    "force_instrumental": True,
+                    "style": music_request.style,
+                    "mood": music_request.mood,
+                    "tempo_bpm": music_request.tempo_bpm,
+                    "instruments": music_request.instruments,
+                    "duration_seconds": music_request.duration_seconds,
+                    "force_instrumental": music_request.instrumental,
+                    "maximum_cost_usd": music_request.maximum_cost_usd,
                     "output_path": str(music_path),
                 }
             )
@@ -978,17 +1054,50 @@ def _materialize_media(
             if path:
                 props.setdefault("audio", {})["music"] = {
                     "src": _public_asset_src(path, public_dir),
-                    "volume": 0.12,
-                    "duckingVolume": 0.045,
-                    "fadeInSeconds": 1.5,
-                    "fadeOutSeconds": 2.5,
-                    "loop": True,
+                    **music_props,
                 }
-                media_assets.append(_media_asset(path, kind="audio", result=result, tool_name=tool.name))
+                media_assets.append(
+                    _media_asset(
+                        path,
+                        kind="audio",
+                        result=result,
+                        tool_name=tool.name,
+                        metadata={
+                            "license": {"source": "provider_generated"},
+                            "target_lufs": music_request.target_lufs,
+                            "ducking_db": music_request.ducking_db,
+                        },
+                    )
+                )
+                media_assets[-1]["role"] = "background_music"
             else:
-                fallback("soundtrack", "music_generation")
+                if music_request.fallback == "continue_without_music":
+                    props.setdefault("degradations", []).append("background_music")
+                    store.append_event(
+                        job,
+                        "media.fallback_applied",
+                        {
+                            "scene_id": "soundtrack",
+                            "capability": "music_generation",
+                            "fallback": "continue_without_music",
+                        },
+                    )
+                else:
+                    fallback("soundtrack", "music_generation", provider=music_provider, result=result)
         else:
-            fallback("soundtrack", "music_generation")
+            if music_request.fallback == "continue_without_music":
+                props.setdefault("degradations", []).append("background_music")
+                store.append_event(
+                    job,
+                    "media.fallback_applied",
+                    {
+                        "scene_id": "soundtrack",
+                        "capability": "music_generation",
+                        "fallback": "continue_without_music",
+                    },
+                )
+            else:
+                fallback("soundtrack", "music_generation", provider=music_provider)
 
     return media_assets
 
@@ -1039,6 +1148,78 @@ def _ffprobe(path: Path) -> dict[str, Any]:
         "video_codec": video.get("codec_name"),
         "audio_codec": audio.get("codec_name"),
     }
+
+
+def _integrated_lufs(path: Path) -> float | None:
+    """Measure integrated loudness without retaining raw FFmpeg diagnostics."""
+
+    process = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-vn",
+            "-af",
+            "loudnorm=print_format=json",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for candidate in reversed(re.findall(r"\{[\s\S]*?\}", process.stderr)):
+        try:
+            payload = json.loads(candidate)
+            return round(float(payload["input_i"]), 2)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _normalize_rendered_audio(output_path: Path, *, target_lufs: float) -> float:
+    """Normalize the final mixed soundtrack while copying video losslessly."""
+
+    metadata = _ffprobe(output_path)
+    if not metadata.get("audio_codec"):
+        raise ValueError("MUSIC_MIX_AUDIO_STREAM_MISSING")
+    target = max(-40.0, min(-5.0, float(target_lufs)))
+    temporary = output_path.with_name(f".{output_path.stem}.normalized{output_path.suffix}")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(output_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-c:v",
+            "copy",
+            "-af",
+            f"loudnorm=I={target}:LRA=11:TP=-1.5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(temporary),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    os.replace(temporary, output_path)
+    measured = _integrated_lufs(output_path)
+    if measured is None:
+        raise ValueError("MUSIC_MIX_LOUDNESS_UNMEASURABLE")
+    return measured
 
 
 def _ffprobe_image(path: Path) -> dict[str, Any]:
@@ -1263,6 +1444,21 @@ def _quality_report(
         expected="audio stream" if narration_required else "optional",
         detail="Approved narration requires a playable audio stream.",
     )
+    props_audio = props.get("audio") if isinstance(props.get("audio"), dict) else {}
+    target_lufs = props_audio.get("targetLufs")
+    music_config = audio.get("music") if isinstance(audio.get("music"), dict) else {}
+    if target_lufs is None:
+        target_lufs = music_config.get("target_lufs")
+    integrated_lufs = _integrated_lufs(output_path) if has_audio else None
+    if target_lufs is not None:
+        target_lufs = float(target_lufs)
+        check(
+            "audio_loudness",
+            integrated_lufs is not None and abs(integrated_lufs - target_lufs) <= 2.0,
+            actual=integrated_lufs,
+            expected={"target_lufs": target_lufs, "tolerance": 2.0},
+            detail="Final narration and music mix must match the approved loudness target.",
+        )
 
     black_seconds = 0.0
     black_process = subprocess.run(
@@ -1358,6 +1554,10 @@ def _quality_report(
         "checks": checks,
         "failed_checks": failed,
         "media": metadata,
+        "audio": {
+            "integrated_lufs": integrated_lufs,
+            "target_lufs": target_lufs,
+        },
         "created_at": utc_now(),
     }
 
@@ -1457,6 +1657,21 @@ def render_job(store: EngineStore, job_id: str, repo_root: Path) -> None:
                 time.sleep(0.25)
             if process.returncode != 0:
                 raise subprocess.CalledProcessError(process.returncode, command)
+
+        audio_props = props.get("audio") if isinstance(props.get("audio"), dict) else {}
+        if audio_props.get("music") and audio_props.get("targetLufs") is not None:
+            normalized_lufs = _normalize_rendered_audio(
+                output_path,
+                target_lufs=float(audio_props["targetLufs"]),
+            )
+            store.append_event(
+                job,
+                "media.audio_normalized",
+                {
+                    "target_lufs": float(audio_props["targetLufs"]),
+                    "integrated_lufs": normalized_lufs,
+                },
+            )
 
         current = store.load_job(job_id)
         if not current or current["status"] == "cancelled":

@@ -40,6 +40,33 @@ class VideoShotRequest(BaseModel):
         return self
 
 
+class MusicRequest(BaseModel):
+    """One approved background-music source and deterministic mix contract."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["uploaded", "library", "generated", "none"] = "none"
+    asset_id: str | None = Field(default=None, min_length=1, max_length=240)
+    style: str = Field(default="", max_length=1000)
+    mood: str = Field(default="", max_length=240)
+    tempo_bpm: int | None = Field(default=None, ge=40, le=220)
+    instruments: list[str] = Field(default_factory=list, max_length=24)
+    duration_seconds: float = Field(gt=0, le=3600)
+    instrumental: bool = True
+    target_lufs: float = Field(default=-16.0, ge=-40, le=-5)
+    ducking_db: float = Field(default=-8.0, ge=-40, le=0)
+    fade_in_seconds: float = Field(default=0.4, ge=0, le=30)
+    fade_out_seconds: float = Field(default=1.2, ge=0, le=30)
+    provider: str = Field(default="auto", min_length=1, max_length=64)
+    maximum_cost_usd: float = Field(ge=0)
+    fallback: Literal["ask", "continue_without_music"] = "ask"
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "MusicRequest":
+        if self.source in {"uploaded", "library"} and not self.asset_id:
+            raise ValueError(f"{self.source} music requires asset_id")
+        return self
+
+
 class VideoScene(BaseModel):
     model_config = ConfigDict(extra="allow")
     scene_id: str

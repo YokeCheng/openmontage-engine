@@ -1372,7 +1372,9 @@ def test_uploaded_music_is_bound_with_narration_ducking(
 
     media_assets = _materialize_media(payload, props, job_dir / "assets", store, job)
 
-    assert media_assets == []
+    assert len(media_assets) == 1
+    assert media_assets[0]["role"] == "background_music"
+    assert media_assets[0]["metadata"]["license"]["source"] == "user_upload"
     assert props["audio"]["music"]["src"] == "inputs/asset_music/theme.mp3"
     assert props["audio"]["music"]["duckingVolume"] < props["audio"]["music"]["volume"]
 
