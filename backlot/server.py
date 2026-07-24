@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import time
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
@@ -256,10 +257,14 @@ def create_app() -> FastAPI:
             return FileResponse(target)
         return FileResponse(cached, media_type="image/jpeg")
 
-    # ---- Media (range requests handled by FileResponse) ---------------
+    # ---- Media (explicit Range support across Starlette versions) -----
 
     @app.get("/media/{project_id}/{file_path:path}")
-    async def media(project_id: str, file_path: str) -> FileResponse:
+    async def media(
+        project_id: str,
+        file_path: str,
+        request: Request,
+    ) -> Response:
         project_dir = _safe_project_dir(project_id)
         target = (project_dir / file_path).resolve()
         try:
@@ -268,7 +273,54 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="path escapes project")
         if not target.is_file():
             raise HTTPException(status_code=404, detail="media not found")
-        return FileResponse(target)
+        size = target.stat().st_size
+        range_header = request.headers.get("range")
+        if not range_header:
+            return FileResponse(target, headers={"Accept-Ranges": "bytes"})
+        if not range_header.startswith("bytes=") or "," in range_header:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{size}"},
+            )
+        start_text, separator, end_text = range_header[6:].partition("-")
+        if not separator:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{size}"},
+            )
+        try:
+            if start_text:
+                start = int(start_text)
+                end = int(end_text) if end_text else size - 1
+            else:
+                suffix_length = int(end_text)
+                start = max(0, size - suffix_length)
+                end = size - 1
+        except ValueError:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{size}"},
+            )
+        if start < 0 or end < start or start >= size:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{size}"},
+            )
+        end = min(end, size - 1)
+        with target.open("rb") as handle:
+            handle.seek(start)
+            content = handle.read(end - start + 1)
+        return Response(
+            content,
+            status_code=206,
+            media_type=mimetypes.guess_type(target.name)[0]
+            or "application/octet-stream",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(len(content)),
+            },
+        )
 
     # ---- UI ------------------------------------------------------------
 

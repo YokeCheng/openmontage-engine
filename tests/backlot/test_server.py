@@ -137,6 +137,28 @@ class TestBacklotServerApi:
         assert response.content == b"2345"
         assert response.headers["content-range"].startswith("bytes 2-5/10")
 
+    def test_media_supports_suffix_range_and_rejects_invalid_range(
+        self, client, projects_root
+    ):
+        project = _make_project(projects_root, "film")
+        media = project / "renders" / "final.mp4"
+        media.write_bytes(b"0123456789")
+
+        suffix = client.get(
+            "/media/film/renders/final.mp4",
+            headers={"Range": "bytes=-3"},
+        )
+        invalid = client.get(
+            "/media/film/renders/final.mp4",
+            headers={"Range": "bytes=20-30"},
+        )
+
+        assert suffix.status_code == 206
+        assert suffix.content == b"789"
+        assert suffix.headers["content-range"] == "bytes 7-9/10"
+        assert invalid.status_code == 416
+        assert invalid.headers["content-range"] == "bytes */10"
+
     def test_thumb_downscales_image_and_passes_through_non_media(self, client, projects_root):
         project = _make_project(projects_root, "film")
         _write_png(project / "assets" / "images" / "sc1.png")
