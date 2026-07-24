@@ -179,7 +179,16 @@ class MusicLibrary(BaseTool):
     # ---- Status ----
 
     def get_status(self) -> ToolStatus:
-        return ToolStatus.AVAILABLE if self._list_tracks(self._library_dir()) else ToolStatus.UNAVAILABLE
+        tracks = self._list_tracks(self._library_dir())
+        if not tracks:
+            return ToolStatus.UNAVAILABLE
+        if shutil.which("ffprobe") is None:
+            return ToolStatus.AVAILABLE
+        return (
+            ToolStatus.AVAILABLE
+            if any(self._probe_duration(track) is not None for track in tracks)
+            else ToolStatus.UNAVAILABLE
+        )
 
     # ---- Execution ----
 

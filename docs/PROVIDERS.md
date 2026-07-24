@@ -75,6 +75,14 @@ returns `403 Forbidden`, the site is blocking automated access from the current
 network; use `music_gen`, `suno_music`, Freesound, or a user-provided
 `music_library/` track instead of silently claiming Pixabay music was generated.
 
+### Local music library
+
+Set `MUSIC_LIBRARY_DIR` to a directory of music that your deployment is licensed
+to use. When `ffprobe` is installed, OpenMontage reports this capability as
+available only if at least one supported file is actually playable; renaming an
+empty or invalid file to `.mp3` is not sufficient. The selected track remains a
+local deterministic input and does not require a provider credential.
+
 ---
 
 ## Cloud Providers

@@ -47,9 +47,33 @@ def test_status_unavailable_when_dir_empty(tmp_path, monkeypatch):
     assert MusicLibrary().get_status() == ToolStatus.UNAVAILABLE
 
 
-def test_status_available_with_tracks(tmp_path, monkeypatch):
+def test_status_available_with_tracks_when_ffprobe_is_missing(tmp_path, monkeypatch):
     _make_track(tmp_path / "calm_dawn.mp3")
     monkeypatch.setenv("MUSIC_LIBRARY_DIR", str(tmp_path))
+    monkeypatch.setattr("tools.audio.music_library.shutil.which", lambda _name: None)
+    assert MusicLibrary().get_status() == ToolStatus.AVAILABLE
+
+
+def test_status_unavailable_when_all_tracks_are_unplayable(tmp_path, monkeypatch):
+    _make_track(tmp_path / "broken.mp3")
+    monkeypatch.setenv("MUSIC_LIBRARY_DIR", str(tmp_path))
+    monkeypatch.setattr("tools.audio.music_library.shutil.which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(MusicLibrary, "_probe_duration", staticmethod(lambda _path: None))
+
+    assert MusicLibrary().get_status() == ToolStatus.UNAVAILABLE
+
+
+def test_status_available_when_any_track_is_playable(tmp_path, monkeypatch):
+    _make_track(tmp_path / "broken.mp3")
+    _make_track(tmp_path / "playable.mp3")
+    monkeypatch.setenv("MUSIC_LIBRARY_DIR", str(tmp_path))
+    monkeypatch.setattr("tools.audio.music_library.shutil.which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(
+        MusicLibrary,
+        "_probe_duration",
+        staticmethod(lambda path: 30.0 if path.name == "playable.mp3" else None),
+    )
+
     assert MusicLibrary().get_status() == ToolStatus.AVAILABLE
 
 
