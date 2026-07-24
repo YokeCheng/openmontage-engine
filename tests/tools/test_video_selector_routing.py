@@ -239,6 +239,11 @@ def test_fallback_excludes_image_selector_for_reference_to_video():
     assert "image_selector" not in fallback
 
 
+def test_selector_contract_exposes_provider_task_resume_id():
+    schema = VideoSelector().input_schema
+    assert "provider_task_id" in schema["properties"]
+
+
 def test_fallback_keeps_image_selector_for_text_to_video():
     """A still-image degraded fallback is acceptable for a non-motion brief."""
     sel = VideoSelector()

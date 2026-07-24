@@ -54,6 +54,7 @@ class MediaReceipt(BaseModel):
     provider: str
     model: str | None = None
     external_task_id: str | None = None
+    resume_supported: bool = False
     cost_usd: float | None = Field(default=None, ge=0)
     elapsed_ms: int | None = Field(default=None, ge=0)
     output_path: str | None = None
@@ -149,6 +150,12 @@ def _require_safe_existing(
         return None
     if receipt.request_sha256 != request_sha256:
         raise MediaReceiptConflict("IDEMPOTENCY_CONFLICT")
+    if (
+        receipt.status == "submitted"
+        and receipt.resume_supported
+        and receipt.external_task_id
+    ):
+        return None
     if receipt.status in {"submitted", "charge_unknown"}:
         raise MediaChargeReconciliationRequired(
             receipt.error_code or "PROVIDER_CHARGE_RECONCILIATION_REQUIRED"
@@ -176,12 +183,20 @@ def execute_video_shot(
         return cached
 
     inputs = _provider_inputs(request)
+    existing = load_receipt(receipt_root, request.idempotency_key)
+    if (
+        existing is not None
+        and existing.status == "submitted"
+        and existing.resume_supported
+        and existing.external_task_id
+    ):
+        inputs["provider_task_id"] = existing.external_task_id
     estimated_cost = float(selector.estimate_cost(inputs) or 0)
     if estimated_cost > request.maximum_cost_usd:
         raise MediaBudgetExceeded("VIDEO_SHOT_BUDGET_EXCEEDED")
 
     started = time.monotonic()
-    submitted = MediaReceipt(
+    submitted = existing or MediaReceipt(
         idempotency_key=request.idempotency_key,
         request_sha256=request_sha256,
         status="submitted",
@@ -193,13 +208,20 @@ def execute_video_shot(
     try:
         result = selector.execute(inputs)
     except Exception as exc:
+        can_resume = bool(
+            submitted.resume_supported and submitted.external_task_id
+        )
         save_receipt(
             receipt_root,
             submitted.model_copy(
                 update={
-                    "status": "charge_unknown",
+                    "status": "submitted" if can_resume else "charge_unknown",
                     "elapsed_ms": round((time.monotonic() - started) * 1000),
-                    "error_code": "PROVIDER_EXECUTION_INTERRUPTED",
+                    "error_code": (
+                        "PROVIDER_TASK_POLL_INTERRUPTED"
+                        if can_resume
+                        else "PROVIDER_EXECUTION_INTERRUPTED"
+                    ),
                 }
             ),
         )
@@ -217,6 +239,9 @@ def execute_video_shot(
         "provider": selected_provider,
         "model": result.model or request.model,
         "external_task_id": str(external_task_id) if external_task_id else None,
+        "resume_supported": bool(
+            data.get("resume_supported") or submitted.resume_supported
+        ),
         "cost_usd": float(result.cost_usd or 0),
         "elapsed_ms": elapsed_ms,
     }
@@ -249,6 +274,19 @@ def execute_video_shot(
                 ),
             )
             raise MediaProviderFailed(result.error or "MEDIA_PROVIDER_FAILED")
+        if common["external_task_id"] and common["resume_supported"]:
+            error_code = result.error_code or "PROVIDER_TASK_PENDING"
+            save_receipt(
+                receipt_root,
+                submitted.model_copy(
+                    update={
+                        **common,
+                        "status": "submitted",
+                        "error_code": error_code,
+                    }
+                ),
+            )
+            raise MediaChargeReconciliationRequired(error_code)
         save_receipt(
             receipt_root,
             submitted.model_copy(

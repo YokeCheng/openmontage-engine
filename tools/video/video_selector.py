@@ -175,6 +175,13 @@ class VideoSelector(BaseTool):
                 "type": "string",
                 "description": "Provider-specific idempotency/provenance task id.",
             },
+            "provider_task_id": {
+                "type": "string",
+                "description": (
+                    "Previously created provider task to resume polling without "
+                    "submitting another billable generation request."
+                ),
+            },
             "workflow_json": {
                 "type": "string",
                 "description": (
