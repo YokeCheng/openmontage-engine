@@ -1496,6 +1496,58 @@ def test_provider_catalog_and_runtime_configuration_are_registry_backed_and_ephe
     assert rejected.json()["error_code"] == "RUNTIME_CONFIG_FIELD_UNSUPPORTED"
 
 
+def test_one_dashscope_runtime_key_enables_video_without_exposing_the_secret(
+    client: TestClient,
+) -> None:
+    import os
+
+    import engine_api.app as app_module
+    from tools.tool_registry import registry
+
+    secret = "dashscope-video-runtime-secret"
+    original = os.environ.get("DASHSCOPE_API_KEY")
+    try:
+        configured = client.put(
+            "/v1/runtime/config",
+            json={"values": {"DASHSCOPE_API_KEY": secret}},
+        )
+        assert configured.status_code == 200
+        payload = configured.json()
+        dashscope = next(
+            item
+            for item in payload["providers"]
+            if item["provider"] == "dashscope"
+        )
+        tools = {
+            item["name"]: item
+            for item in dashscope["tools"]
+        }
+
+        assert "video_generation" in dashscope["capabilities"]
+        assert "DASHSCOPE_API_KEY" in dashscope["credential_fields"]
+        assert dashscope["configured"] is True
+        assert tools["dashscope_video"]["status"] == "available"
+        assert secret not in json.dumps(payload)
+
+        catalog = client.get("/v1/providers")
+        assert catalog.status_code == 200
+        assert secret not in catalog.text
+        runtime_text = "\n".join(
+            path.read_text(errors="ignore")
+            for path in client.app.state.store.root.rglob("*")
+            if path.is_file()
+        )
+        assert secret not in runtime_text
+    finally:
+        if original is None:
+            os.environ.pop("DASHSCOPE_API_KEY", None)
+        else:
+            os.environ["DASHSCOPE_API_KEY"] = original
+        registry.clear()
+        app_module._RUNTIME_CONFIG_DIGEST = None
+        app_module._RUNTIME_CONFIG_SNAPSHOT = None
+
+
 def test_runtime_configuration_refresh_does_not_block_health(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
