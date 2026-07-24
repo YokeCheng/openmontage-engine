@@ -1,6 +1,6 @@
 ---
 name: dashscope
-description: DashScope (Alibaba Cloud Bailian / 阿里云百炼) integration — image generation (qwen-image-2.0-pro), text-to-speech (qwen3-tts-flash), and ASR with word-level timestamps (qwen3-asr-flash-filetrans). Use when generating images via Qwen-Image, narrating via Qwen-TTS, or transcribing with word-level timestamps via Qwen-ASR.
+description: DashScope (Alibaba Cloud Bailian / 阿里云百炼) integration — Wan video, image generation, text-to-speech, and ASR with word-level timestamps.
 ---
 
 # DashScope
@@ -9,9 +9,25 @@ Requires `DASHSCOPE_API_KEY` in `.env`. Get one at https://dashscope.aliyun.com/
 
 ## Current API
 
-**CRITICAL:** DashScope's `/compatible-mode/v1/` only supports `/chat/completions` and `/embeddings`. Image generation, TTS, and ASR all use **DashScope-native endpoints** — not OpenAI-compatible paths.
+**CRITICAL:** DashScope's `/compatible-mode/v1/` only supports `/chat/completions` and `/embeddings`. Video, image generation, TTS, and ASR all use **DashScope-native endpoints** — not OpenAI-compatible paths.
 
-All three tools use `Authorization: Bearer $DASHSCOPE_API_KEY`.
+All tools use `Authorization: Bearer $DASHSCOPE_API_KEY`.
+
+### Wan Video Generation
+
+```text
+POST https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis
+Header: X-DashScope-Async: enable
+GET  https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
+```
+
+- Text model: `wan2.6-t2v` by default.
+- Image model: `wan2.6-i2v-flash` by default.
+- Wan 2.6 accepts integer durations from 2 through 15 seconds.
+- 720P text-to-video sizes: `1280*720`, `720*1280`, `960*960`.
+- Local first-frame images are encoded as `data:image/...;base64,...`.
+- A previously created remote task is resumed with `provider_task_id`; never create a replacement task merely because local polling timed out.
+- Result URLs are temporary and signed. Download them immediately and never persist or log them.
 
 ### Image Generation
 
@@ -62,6 +78,22 @@ result = ImageSelector().execute({
 })
 ```
 
+### Video via selector
+
+```python
+from tools.video.video_selector import VideoSelector
+
+result = VideoSelector().execute({
+    "preferred_provider": "dashscope",
+    "allowed_providers": ["dashscope"],
+    "operation": "text_to_video",
+    "prompt": "单镜头，镜头穿过清晰的数据流，最后聚焦产品界面",
+    "duration": 5,
+    "aspect_ratio": "16:9",
+    "output_path": "projects/my-video/assets/video/hero.mp4",
+})
+```
+
 ### TTS via selector
 
 ```python
@@ -90,12 +122,24 @@ result = DashscopeAsr().execute({
 
 ## Recommended Workflow
 
-1. **Image:** Generate a sample first. Check `prompt_extend: true` (default) — DashScope rewrites your prompt for better results. Disable if you need literal prompt adherence.
-2. **TTS:** Generate a 10-15 second sample before full narration. Approve voice and pacing before committing to full generation.
-3. **ASR:** Audio must be at a **publicly accessible URL**. Upload to any public host (S3, etc.) first. Local paths are rejected with a clear error.
-4. **Subtitles:** Build from `result.data["words"]` — each word has `begin_time_seconds` and `end_time_seconds`. Group words into caption phrases by language semantics, not fixed character count.
+1. **Video:** Generate one 2-5 second sample first. State the provider, model and cost ceiling before the paid call. Prefer one continuous camera action per hero shot.
+2. **Image:** Generate a sample first. Check `prompt_extend: true` (default) — DashScope rewrites your prompt for better results. Disable if you need literal prompt adherence.
+3. **TTS:** Generate a 10-15 second sample before full narration. Approve voice and pacing before committing to full generation.
+4. **ASR:** Audio must be at a **publicly accessible URL**. Upload to any public host (S3, etc.) first. Local paths are rejected with a clear error.
+5. **Subtitles:** Build from `result.data["words"]` — each word has `begin_time_seconds` and `end_time_seconds`. Group words into caption phrases by language semantics, not fixed character count.
 
 ## Parameters
+
+### Video (`dashscope_video`)
+- `prompt` (required): one-shot visual and motion description
+- `operation`: `text_to_video` or `image_to_video`
+- `duration`: integer from 2 through 15 seconds
+- `aspect_ratio`: `16:9`, `9:16`, or `1:1`
+- `reference_image_path` / `reference_image_url`: first frame for image-to-video
+- `provider_task_id`: resume an existing paid remote task without creating another
+- `poll_interval_seconds`: default `5`
+- `timeout_seconds`: default `300`
+- `output_path`: local MP4 destination
 
 ### Image (`dashscope_image`)
 - `prompt` (required): text prompt
@@ -124,6 +168,9 @@ result = DashscopeAsr().execute({
 
 ## Troubleshooting
 
+- **Video polling timeout:** Keep the returned `task_id` and resume it. Do not submit the same paid shot again.
+- **Video 1:1 size error:** Wan 2.6 720P square is `960*960`, not `720*720`.
+- **Image-to-video reference error:** Use a public/OSS URL or a supported local image up to 20 MB; local images are Base64 encoded.
 - **Image size error:** Use `"W*H"` with asterisk, not `"WxH"`. Example: `"2048*2048"`.
 - **TTS no audio URL:** Check `output.audio.url` — if empty, the model name or voice may be wrong.
 - **ASR "file not accessible":** `audio_url` must be publicly reachable. DashScope servers fetch the file; local paths and auth-gated URLs don't work.
